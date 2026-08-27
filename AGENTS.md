@@ -1,0 +1,952 @@
+# Taphonomy Agent Instructions
+
+## 1. Purpose
+
+This repository contains Taphonomy, a local-first digital data recovery system.
+
+Taphonomy is intended to become a serious engineering project that may eventually be used for personal data recovery and presented as professional engineering work.
+
+Correctness, evidence preservation, security, reproducibility, and documentation take priority over development speed.
+
+These instructions apply to Claude Code and any other coding agent operating in this repository.
+
+---
+
+# 2. Highest-Priority Rules
+
+Before making changes, an agent must understand:
+
+```text
+docs/PROJECT.md
+docs/SAFETY.md
+SECURITY.md
+docs/ARCHITECTURE.md
+```
+
+If these documents conflict with an implementation request, stop and report the conflict.
+
+Do not silently choose an unsafe interpretation.
+
+---
+
+# 3. Source Evidence Is Sacred
+
+Never perform experiments against real user recovery evidence unless the user explicitly authorizes the exact operation.
+
+Never assume that a mounted device is disposable.
+
+Never assume that a device path identifies the same physical device throughout an operation.
+
+Never write recovered output to the source.
+
+Never format, repair, repartition, overwrite, or modify a source device during normal development.
+
+---
+
+# 4. Development Evidence
+
+Development and testing must use controlled evidence.
+
+Preferred test inputs are:
+
+* synthetic disk images
+* synthetic filesystems
+* generated files
+* intentionally corrupted fixtures
+* disposable virtual disks
+* controlled database fixtures
+* known-good reference artifacts
+
+Real personal data must not be committed to the repository.
+
+---
+
+# 5. Stop Conditions
+
+The agent must stop and ask the user before proceeding when:
+
+1. A command could modify a physical device.
+2. A command could delete user data.
+3. A command could overwrite evidence.
+4. A command requires destructive filesystem operations.
+5. The identity of a source device is ambiguous.
+6. The identity of a destination is ambiguous.
+7. An operation would transmit evidence over a network.
+8. An external service would receive user data.
+9. A security boundary would be weakened.
+10. An architectural invariant would need to change.
+11. A safety rule would need to change.
+12. A dependency introduces a significant security or licensing concern.
+13. The requested behavior cannot be implemented safely with the available evidence.
+
+When uncertain, stop.
+
+---
+
+# 6. Never Fake Progress
+
+The agent must never claim that functionality:
+
+* works
+* is safe
+* is tested
+* is accurate
+* is production-ready
+* supports a filesystem
+* successfully recovered data
+
+unless there is evidence supporting that claim.
+
+Distinguish clearly between:
+
+```text
+Implemented
+Tested
+Experimentally validated
+Partially supported
+Untested
+Known limitation
+Planned
+```
+
+---
+
+# 7. Research Before Implementation
+
+Do not implement recovery algorithms based solely on assumptions.
+
+For technically significant recovery functionality, research should establish:
+
+* relevant specifications
+* filesystem behavior
+* storage behavior
+* known limitations
+* existing open-source implementations
+* applicable standards
+* platform-specific constraints
+* expected failure modes
+
+Research findings should be recorded in the appropriate documentation.
+
+---
+
+# 8. Existing Open-Source Software
+
+Before implementing a major recovery capability, investigate existing mature projects where appropriate.
+
+The goal is to learn from:
+
+* established algorithms
+* filesystem structures
+* edge cases
+* testing strategies
+* failure handling
+* limitations
+
+Do not copy code without checking its license and compatibility with Taphonomy's license.
+
+Do not reproduce large sections of third-party code merely because they appear useful.
+
+Prefer:
+
+```text
+understand
+→ evaluate
+→ design
+→ implement
+→ test
+```
+
+over blind transplantation.
+
+---
+
+# 9. Architecture Discipline
+
+Do not create abstractions without a demonstrated requirement.
+
+Do not introduce:
+
+* generic managers
+* universal factories
+* unnecessary service layers
+* speculative plugin systems
+* unnecessary databases
+* unnecessary message buses
+* unnecessary configuration systems
+
+The architecture should remain understandable to one experienced engineer.
+
+Prefer small, explicit components over abstraction for abstraction's sake.
+
+---
+
+# 10. Recovery Domains Must Remain Separate
+
+The following domains must not be unnecessarily coupled:
+
+```text
+Removable Storage
+HDD
+SSD
+Android
+iOS
+Application Artifacts
+```
+
+Shared infrastructure is allowed where the underlying behavior is genuinely shared.
+
+A shared interface must not hide important technical differences between domains.
+
+---
+
+# 11. CLI Is an Interface
+
+The CLI must not contain recovery algorithms.
+
+The conceptual dependency direction is:
+
+```text
+CLI
+ ↓
+Application
+ ↓
+Domain
+ ↓
+Infrastructure
+```
+
+Recovery logic must be callable independently of CLI parsing.
+
+This allows the same engine to be tested and eventually exposed through other interfaces.
+
+---
+
+# 12. Safety Before Optimization
+
+Do not optimize recovery code before correctness is established.
+
+The preferred development order is:
+
+```text
+Correctness
+ ↓
+Validation
+ ↓
+Safety
+ ↓
+Testing
+ ↓
+Measurement
+ ↓
+Optimization
+```
+
+Performance improvements must not silently change recovery results.
+
+---
+
+# 13. Evidence Access
+
+Evidence must be accessed through controlled abstractions where practical.
+
+Recovery algorithms should not directly manipulate arbitrary filesystem paths or physical devices.
+
+The system should distinguish between:
+
+```text
+source
+working evidence
+analysis
+recovery output
+```
+
+---
+
+# 14. Error Handling
+
+Do not ignore errors.
+
+Avoid:
+
+```text
+catch and continue
+```
+
+when continuing could compromise correctness.
+
+Errors should preserve enough context for diagnosis.
+
+Differentiate between:
+
+* expected absence
+* malformed data
+* unsupported format
+* I/O failure
+* permission failure
+* device removal
+* validation failure
+* internal programming error
+
+---
+
+# 15. Panic and Crash Policy
+
+Normal malformed evidence must not cause uncontrolled crashes.
+
+For Rust code:
+
+* avoid unnecessary `unwrap()`
+* avoid unnecessary `expect()`
+* handle recoverable errors explicitly
+* use `Result` and `Option` appropriately
+* document intentional panics
+* isolate unsafe code
+
+A parser must assume its input may be malformed.
+
+---
+
+# 16. Unsafe Code
+
+`unsafe` code requires justification.
+
+Every non-trivial unsafe block must document:
+
+1. why unsafe behavior is necessary
+2. the invariants required for correctness
+3. why those invariants are satisfied
+
+Do not introduce unsafe code merely for convenience or premature optimization.
+
+---
+
+# 17. Security
+
+Treat all evidence as untrusted input.
+
+Defend against:
+
+* out-of-bounds access
+* integer overflow
+* integer underflow
+* path traversal
+* malicious filenames
+* malformed metadata
+* excessive allocations
+* recursion exhaustion
+* CPU exhaustion
+* malicious compressed data
+* symbolic-link attacks
+
+See `SECURITY.md` for the complete security specification.
+
+---
+
+# 18. Source Modification
+
+Before introducing any code capable of writing to a device, explicitly identify:
+
+```text
+What is being written?
+Why is it necessary?
+Can the operation be performed against an image instead?
+What prevents the source from being selected accidentally?
+What tests prove the protection?
+```
+
+Destructive functionality requires explicit architectural review.
+
+---
+
+# 19. Network Access
+
+Do not introduce network communication into the recovery path without explicit approval.
+
+Do not add:
+
+* telemetry
+* analytics
+* cloud uploads
+* remote recovery
+* external AI processing
+* automatic crash reporting
+
+without documenting the security and privacy implications first.
+
+---
+
+# 20. Dependencies
+
+Before adding a significant dependency, evaluate:
+
+* purpose
+* maintenance
+* license
+* security history
+* transitive dependencies
+* binary components
+* required privileges
+* network behavior
+
+Do not add dependencies for functionality that can reasonably be implemented with existing project capabilities.
+
+---
+
+# 21. Documentation Is Part of the Implementation
+
+A feature is incomplete when its required documentation is missing.
+
+Documentation should explain:
+
+* what was implemented
+* why it was implemented
+* important assumptions
+* limitations
+* safety implications
+* testing performed
+* known failures
+
+Do not update documentation merely to claim that something works.
+
+---
+
+# 22. Architecture Decision Records
+
+Create an ADR when a decision materially affects architecture.
+
+Examples:
+
+* programming language
+* evidence representation
+* filesystem abstraction
+* image format
+* major dependency
+* storage model
+* concurrency model
+* plugin architecture
+* mobile acquisition architecture
+* security boundary
+
+An ADR should explain:
+
+```text
+Context
+Decision
+Alternatives
+Reasoning
+Consequences
+```
+
+Do not create ADRs for trivial implementation choices.
+
+---
+
+# 23. Research Log
+
+Research that materially affects implementation should be recorded in:
+
+```text
+docs/development/RESEARCH_LOG.md
+```
+
+Record:
+
+* date
+* subject
+* sources
+* findings
+* implications
+* confidence
+* follow-up work
+
+Research should be reproducible by another engineer.
+
+---
+
+# 24. Experiments
+
+Experiments belong in:
+
+```text
+docs/development/EXPERIMENTS.md
+```
+
+An experiment should identify:
+
+```text
+Question
+Hypothesis
+Input
+Method
+Expected result
+Actual result
+Conclusion
+Next action
+```
+
+Experiments must use controlled evidence.
+
+---
+
+# 25. Testing
+
+Every meaningful implementation should have appropriate tests.
+
+Tests may include:
+
+```text
+Unit tests
+Component tests
+Integration tests
+Filesystem fixture tests
+End-to-end tests
+Property tests
+Fuzz tests
+Regression tests
+```
+
+Do not write tests that merely reproduce the implementation's own assumptions.
+
+Tests should verify externally meaningful behavior.
+
+---
+
+# 26. Recovery Accuracy
+
+Recovery testing must measure both:
+
+```text
+successful recovery
+```
+
+and:
+
+```text
+incorrect recovery
+```
+
+False positives are important failures.
+
+A system that produces many plausible but incorrect files must not be considered accurate.
+
+---
+
+# 27. Reproducibility
+
+Recovery experiments should record enough information to reproduce them.
+
+Where applicable record:
+
+* Taphonomy version
+* fixture version
+* input hash
+* configuration
+* recovery method
+* expected result
+* actual result
+
+---
+
+# 28. Git Discipline
+
+Make focused commits.
+
+A commit should represent one coherent change.
+
+Avoid commits that mix:
+
+```text
+architecture changes
+feature implementation
+unrelated formatting
+dependency changes
+documentation rewrites
+```
+
+unless they are genuinely part of the same change.
+
+Do not commit:
+
+* secrets
+* real user data
+* recovery images
+* generated binaries unless explicitly required
+* temporary files
+* personal credentials
+* machine-specific configuration
+
+---
+
+# 29. Before Committing
+
+Before recommending a commit, inspect:
+
+```bash
+git status
+git diff
+git diff --cached
+```
+
+Run the relevant tests and checks.
+
+Do not stage files blindly.
+
+Review the final diff.
+
+---
+
+# 30. Commit Messages
+
+Commit messages should describe the actual change.
+
+Preferred form:
+
+```text
+feat: add evidence reader abstraction
+fix: reject out-of-bounds filesystem reads
+test: add FAT32 deleted-entry fixtures
+docs: record acquisition architecture decision
+```
+
+Do not use vague messages such as:
+
+```text
+updates
+changes
+stuff
+fixes
+work
+```
+
+---
+
+# 31. No Premature Commit
+
+The agent should not commit automatically after every edit.
+
+First:
+
+```text
+implement
+→ inspect
+→ test
+→ review diff
+→ document
+→ commit
+```
+
+The user remains in control of the repository history.
+
+---
+
+# 32. No Destructive Git Operations
+
+Do not execute destructive Git operations without explicit user approval.
+
+Examples:
+
+```text
+git reset --hard
+git clean -fd
+git checkout -- .
+git restore .
+git push --force
+```
+
+If such an operation appears necessary, explain what would be lost and ask first.
+
+---
+
+# 33. Working Tree Preservation
+
+Do not overwrite unrelated user changes.
+
+Before modifying files, inspect the relevant working tree state.
+
+If a file contains user changes unrelated to the current task, preserve them.
+
+---
+
+# 34. Code Quality
+
+Prefer:
+
+* explicit naming
+* small functions
+* narrow responsibilities
+* strong types
+* structured errors
+* deterministic behavior
+* clear interfaces
+* meaningful tests
+
+Avoid:
+
+* giant files
+* giant functions
+* global mutable state
+* magic constants
+* duplicated recovery logic
+* speculative abstractions
+* hidden side effects
+
+---
+
+# 35. Comments
+
+Comments should explain:
+
+```text
+why
+```
+
+rather than restating:
+
+```text
+what
+```
+
+Important safety invariants should be documented near the code they protect.
+
+---
+
+# 36. Generated Code
+
+Generated code must be clearly identified.
+
+Do not manually modify generated files if the project has a source-of-truth generator.
+
+Generated output should not become the place where architecture is implemented.
+
+---
+
+# 37. Formatting
+
+Use the official formatter for the chosen language.
+
+Do not perform broad formatting changes unrelated to the task.
+
+Avoid creating noisy diffs.
+
+---
+
+# 38. Platform Awareness
+
+The initial development environment is:
+
+```text
+Windows
+WSL2
+Linux userspace
+```
+
+Do not assume that Linux behavior inside WSL is identical to native Linux hardware access.
+
+Platform-specific behavior must be documented and tested separately.
+
+---
+
+# 39. CLI Safety UX
+
+Commands capable of interacting with evidence must make the intended source and destination clear.
+
+Dangerous ambiguity must produce an error.
+
+The CLI should prefer:
+
+```text
+explicit failure
+```
+
+over:
+
+```text
+best guess
+```
+
+---
+
+# 40. User Confirmation
+
+Confirmation should be required for genuinely dangerous operations.
+
+Do not add confirmation prompts to every harmless command.
+
+The goal is meaningful protection, not confirmation fatigue.
+
+---
+
+# 41. Performance
+
+Performance must be measured rather than guessed.
+
+When optimizing, record:
+
+* workload
+* hardware
+* Taphonomy version
+* baseline
+* optimized result
+* memory usage where relevant
+* correctness comparison
+
+Never trade evidence integrity for an undocumented performance improvement.
+
+---
+
+# 42. Research Existing Recovery Software
+
+When appropriate, inspect established projects such as:
+
+* TestDisk
+* PhotoRec
+* The Sleuth Kit
+* Autopsy
+* Foremost
+* Scalpel
+* filesystem-specific open-source implementations
+
+Use them as research references.
+
+Their algorithms, licenses, assumptions, and limitations must be evaluated before adoption or adaptation.
+
+---
+
+# 43. Implementation Order
+
+Do not begin by implementing every recovery domain.
+
+The project should progress through controlled milestones.
+
+Preferred progression:
+
+```text
+Repository foundation
+        ↓
+Documentation
+        ↓
+Development environment
+        ↓
+Evidence abstraction
+        ↓
+Synthetic test laboratory
+        ↓
+One narrowly defined recovery capability
+        ↓
+Validation
+        ↓
+Regression testing
+        ↓
+Additional capabilities
+```
+
+The first recovery capability should be selected based on research and testability, not perceived market value.
+
+---
+
+# 44. No Big-Bang Architecture
+
+Do not create the complete final system before validating the first recovery path.
+
+Architecture may evolve based on experimental findings.
+
+When architecture changes:
+
+```text
+Research
+→ ADR
+→ implementation
+→ tests
+→ documentation
+```
+
+---
+
+# 45. Completion Criteria
+
+A task is not complete merely because code compiles.
+
+Depending on the task, completion may require:
+
+* implementation
+* tests
+* error handling
+* documentation
+* research references
+* security review
+* safety review
+* reproducibility information
+* changelog entry
+
+The agent must state what was and was not completed.
+
+---
+
+# 46. Reporting Changes
+
+After completing work, report:
+
+```text
+Changed
+Tests run
+Tests passed
+Known limitations
+Documentation updated
+Security/safety considerations
+Recommended next step
+```
+
+Do not bury important failures in a long summary.
+
+---
+
+# 47. If Something Goes Wrong
+
+If an implementation introduces unexpected behavior:
+
+1. Stop.
+2. Preserve the current state.
+3. Inspect the diff.
+4. Identify the earliest known bad change.
+5. Reproduce using controlled evidence.
+6. Document the failure.
+7. Fix the root cause.
+8. Add a regression test.
+9. Re-run the relevant test suite.
+10. Update documentation if the architectural understanding changed.
+
+Do not repeatedly patch symptoms without understanding the failure.
+
+---
+
+# 48. Final Rule
+
+The agent must optimize for:
+
+```text
+correctness
++
+evidence preservation
++
+security
++
+reproducibility
++
+maintainability
+```
+
+before:
+
+```text
+speed
++
+feature count
++
+abstraction
++
+convenience
+```
+
+If the safest action is to stop and ask the user, stop and ask.
+
