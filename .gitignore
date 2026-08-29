@@ -1,0 +1,41 @@
+# Build output
+/target/
+
+# Cargo.lock is tracked deliberately (DEVELOPMENT_ENVIRONMENT.md section 6)
+
+# Evidence and recovery artefacts must never be committed
+*.dd
+*.raw
+*.img
+*.iso
+*.e01
+*.E01
+*.aff
+*.aff4
+*.vhd
+*.vhdx
+*.vmdk
+*.qcow2
+/evidence/
+/working/
+/recovered/
+/output/
+/scratch/
+
+# Local logs and acquisition records
+*.log
+/logs/
+
+# Editor and OS artefacts
+*~
+*.swp
+*.swo
+.idea/
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+# Claude Code local machine config
+# (a shared .claude/settings.json may be tracked deliberately in future)
+.claude/settings.local.json
