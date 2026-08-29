@@ -127,12 +127,12 @@ Status: **COMPATIBLE**
 
 But:
 
-- `CLAUDE.md` §28 (L636) — the prescribed agent cycle ends `→ commit`
-- `CLAUDE.md` §31 (L626) — "The agent should not commit automatically after
+- `CLAUDE.md` §31 (L677) — the prescribed agent cycle ends `→ commit`
+- `CLAUDE.md` §31 (L667) — "The agent should not commit automatically after
   every edit", which implies committing is otherwise permitted
 - `DEVELOPMENT_ENVIRONMENT.md` §24 (L502) — agent cycle ends in `Commit`
 
-Three locations grant an authority that §0.2 categorically removes. Because
+Three statements grant an authority that §0.2 categorically removes. Because
 §0.2 declares itself overriding, the document is self-resolving in principle,
 but an agent reading §28 in isolation will act on it.
 
