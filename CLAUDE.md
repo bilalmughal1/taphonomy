@@ -664,7 +664,8 @@ work
 
 # 31. No Premature Commit
 
-The agent should not commit automatically after every edit.
+Agents never commit, consistent with §0.2. All commits are made manually by
+the author.
 
 First:
 
@@ -674,7 +675,7 @@ implement
 → test
 → review diff
 → document
-→ commit
+→ propose commit
 ```
 
 The user remains in control of the repository history.

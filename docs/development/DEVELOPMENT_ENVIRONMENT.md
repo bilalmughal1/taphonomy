@@ -500,7 +500,7 @@ Test
     ↓
 Inspect diff
     ↓
-Commit
+Propose commit (author commits manually)
 ```
 
 An agent should not generate large amounts of speculative code before validating the underlying design.
