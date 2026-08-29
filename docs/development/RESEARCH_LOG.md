@@ -292,13 +292,21 @@ However, direct code reuse requires independent license and dependency review.
 
 # 8. Important Unknowns
 
-The following questions remain unresolved:
+Fourteen questions were recorded. Four have since been closed by documented decisions.
 
-1. Which language should implement the core engine?
+Closed questions are retained below with the decision that closed them, so
+this section reads as a record rather than a live list.
+
+1. Which language should implement the core engine? **CLOSED** — closed by
+   ADR-0001.
 2. Which existing Rust crates are mature enough for evidence handling?
-3. Should Taphonomy use or integrate The Sleuth Kit?
-4. Which filesystem should be the first implementation?
+3. Should Taphonomy use or integrate The Sleuth Kit? **CLOSED** — closed by
+   `DEVELOPMENT_ENVIRONMENT.md` §16, which excludes CPL/IPL/GPL licensed
+   dependencies without a documented decision. The Sleuth Kit is CPL/GPL.
+4. Which filesystem should be the first implementation? **CLOSED** — closed
+   by ADR-0002.
 5. Should the first capability be filesystem recovery or file carving?
+   **CLOSED** — closed by ADR-0001 §11.
 6. How should evidence images be represented?
 7. Which image formats should be supported initially?
 8. How should interrupted acquisition be represented?
