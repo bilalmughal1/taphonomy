@@ -39,3 +39,6 @@ Thumbs.db
 # Claude Code local machine config
 # (a shared .claude/settings.json may be tracked deliberately in future)
 .claude/settings.local.json
+
+# Windows download artefacts
+*:Zone.Identifier
