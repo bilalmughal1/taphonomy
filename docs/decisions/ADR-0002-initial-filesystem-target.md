@@ -249,3 +249,95 @@ This decision should be revisited if:
 * an authoritative NTFS specification becomes available
 * FAT32 implementation reveals that the evidence abstraction is unsuitable
 * a real recovery case requires NTFS before the sequence reaches it
+
+---
+
+## Appendix A: Correction to §3.2 (2026-08-29)
+
+This appendix corrects a factual error in §3.2. The body of the ADR above is
+left unmodified, consistent with the treatment of superseded content
+elsewhere in `docs/decisions/`.
+
+### A.1 The error
+
+§3.2 states:
+
+> FAT32 fixtures can be produced with `mkfs.vfat` from `dosfstools`, which is
+> present in a default Ubuntu installation. NTFS fixtures require `ntfsprogs`
+
+The claim that `dosfstools` is present in a default Ubuntu installation is
+**false**.
+
+Measured on the development host, Ubuntu under WSL2, on 2026-08-29:
+
+```text
+which mkfs.vfat mkfs.fat mkntfs mkfs.ntfs sfdisk sgdisk
+  /usr/sbin/sfdisk
+  /usr/sbin/sgdisk
+
+dpkg -l dosfstools ntfs-3g | grep '^ii'
+  (no output)
+
+apt-cache policy dosfstools
+  dosfstools:
+    Installed: (none)
+    Candidate: 4.2-1.1build1
+```
+
+Neither `dosfstools` nor `ntfs-3g` is installed. `sfdisk` (util-linux) and
+`sgdisk` (gdisk) are.
+
+### A.2 What this invalidates
+
+§3.2 presented tooling availability as a differentiator between FAT32 and
+NTFS. It is not. Both require a package installation on this host:
+
+```text
+apt install dosfstools    # mkfs.vfat
+apt install ntfs-3g       # mkntfs
+```
+
+Both are in Ubuntu main. Neither is burdensome. The asymmetry §3.2 claimed
+does not exist.
+
+### A.3 What §3.2 was also asserting without evidence
+
+§3.2 further states that `mkntfs` output "includes non-deterministic elements
+that complicate byte-reproducible fixture generation."
+
+This was not measured. It is plausible — NTFS volumes carry volume GUIDs,
+`$LogFile` contents, and MFT timestamps — but no comparison of repeated
+`mkfs.vfat` and `mkntfs` output was performed before the claim was written.
+
+The claim is therefore **unverified** and must not be cited as evidence until
+tested. Determinism of fixture generation will be measured during milestone
+M2, and the result recorded in
+`docs/development/EXPERIMENTS.md`.
+
+### A.4 Effect on the decision
+
+**The decision is unchanged. FAT32 remains the initial filesystem target.**
+
+§3.1, specification availability, is the primary reason and is unaffected:
+Microsoft has published a FAT32 on-disk specification and has never published
+an authoritative NTFS specification. That argument is decisive on its own,
+and derives from an existing project requirement rather than from
+convenience.
+
+§3.3 (parser surface area), §3.4 (relevance to motivating cases) and §3.5
+(forcing function on the confidence model) are also unaffected.
+
+§3.2 is reduced from a supporting argument to a null one. It should not be
+cited.
+
+### A.5 Cause
+
+The claim was written from assumption rather than measurement, and was not
+checked against the development host before the ADR was committed.
+
+`README.md` §Research and `RESEARCH_LOG.md` conclusion 7 require that the
+project's technical claims rest on documented or measured behaviour. That
+standard applies to decision records as much as to recovery algorithms.
+
+Future ADRs must state the command used to obtain any environmental claim, as
+this appendix does.
