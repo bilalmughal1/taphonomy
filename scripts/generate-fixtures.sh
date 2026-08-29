@@ -214,6 +214,32 @@ fixture_gpt_protective() {
 }
 
 # ---------------------------------------------------------------------------
+# 8. Declared partition type disagrees with actual content.
+#    The partition entry declares type 0x07 (NTFS/exFAT) but the volume is
+#    FAT32. A partition type byte records intent, not content. Taphonomy must
+#    identify the filesystem from the volume's own structure and report the
+#    disagreement rather than trusting either source.
+# ---------------------------------------------------------------------------
+fixture_type_mismatch() {
+    local path="$OUT_DIR/mbr-type-mismatch.img"
+    printf 'mbr-type-mismatch.img\n'
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0x0badf00d
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=7
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    note "declared type 0x07 (NTFS/exFAT), actual content FAT32"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -224,6 +250,7 @@ fixture_no_signature
 fixture_bad_signature
 fixture_partition_beyond_end
 fixture_gpt_protective
+fixture_type_mismatch
 
 # ---------------------------------------------------------------------------
 # Manifest
