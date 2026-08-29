@@ -1,5 +1,9 @@
 # Taphonomy Architecture
 
+> **Status notice:** This document describes an intended architecture. No
+> part of it is implemented. A section becomes binding only when
+> corresponding code and tests exist.
+
 **Project:** Taphonomy
 **Document:** Architecture Specification
 **Version:** 0.1.0
