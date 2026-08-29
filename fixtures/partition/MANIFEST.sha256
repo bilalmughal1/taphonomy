@@ -1,0 +1,7 @@
+26c541d4b036deb75674ede096e176438532f0b1a2b2b02eee4db18c4b3d7566  ./bad-signature.img
+95f5fb4964f0d9a59b703990337850378f05e44e6eda8e2c1b1ab2f1f6e70e19  ./gpt-protective.img
+cd80ded1e925565e17e8b5c3c13f36ab46dd547e746fd0e270683494c15b40e4  ./mbr-empty.img
+a0f089eb175c249aaf28cca55901544cf4e99c8f00efce735228ac2bfe7009ab  ./mbr-four-partitions.img
+8a4eefea99bfad7dd669ec4d9f0aad95b6f1f6de5c1f70fd0f2b3fd991280280  ./mbr-single-fat32.img
+3b6a07d0d404fab4e23b6d34bc6696a6a312dd92821332385e5af7c01c421351  ./no-signature.img
+703233f7d4df1e2cf85714ab9f6097074c8b40cab33d72c6a2bb6b79cf2a6d74  ./partition-beyond-end.img
