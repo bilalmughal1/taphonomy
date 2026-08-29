@@ -6,14 +6,18 @@ The project is designed around evidence preservation, correctness, security, rep
 
 ## Project Status
 
-Taphonomy is currently in the repository foundation and validation stage.
+Taphonomy has a validated read-only evidence layer. No recovery capability is
+implemented yet.
 
-The recovery engine is not implemented yet.
+Milestone M1 of ADR-0002 §8 is complete: evidence images are opened
+read-only, hashed with SHA-256, and their size is reported; hashing is
+verified against NIST FIPS 180-4 vectors; evidence immutability is verified
+by test.
 
 The initial development sequence is:
 
-1. Establish project, safety, security, and architecture contracts.
-2. Build a read-only evidence abstraction.
+1. ~~Establish project, safety, security, and architecture contracts.~~ Done.
+2. ~~Build a read-only evidence abstraction.~~ Done.
 3. Build a synthetic evidence laboratory.
 4. Implement one narrowly defined recovery capability.
 5. Validate recovery accuracy, including false positives.
@@ -26,10 +30,14 @@ The first recovery path is intended to target:
 
 * disk-image evidence
 * RAW/DD images
-* NTFS
+* FAT32
 * deleted controlled-test files
 * read-only evidence access
 * deterministic recovery output
+
+The initial filesystem target is FAT32, not NTFS; see
+`docs/decisions/ADR-0002-initial-filesystem-target.md`. The implementation
+order is FAT32, then exFAT, then NTFS.
 
 Physical-device recovery is outside the initial implementation scope.
 
@@ -65,6 +73,11 @@ The CLI is an interface to the application layer. Recovery logic must remain ind
 Infrastructure is responsible for controlled interaction with evidence and other system resources.
 
 The architecture is intentionally kept small while the first recovery path is being validated.
+
+As implemented, the separation is between the CLI binary and the library
+crate. The library is not yet subdivided into the layers above; that
+subdivision will be introduced when a capability requires it, not in
+advance.
 
 ## Evidence Model
 
@@ -224,7 +237,9 @@ docs/decisions/
 
 At this stage:
 
-* the recovery engine is not implemented
+* no recovery capability is implemented
+* no filesystem parsing is implemented
+* partition detection is not implemented
 * physical-device recovery is not supported
 * recovery accuracy has not yet been established
 * filesystem support has not yet been validated
