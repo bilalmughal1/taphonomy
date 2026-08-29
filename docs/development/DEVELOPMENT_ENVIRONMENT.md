@@ -461,7 +461,7 @@ Claude Code and other coding agents may be used during development.
 Agents must follow:
 
 ```text
-AGENTS.md
+CLAUDE.md
 ```
 
 and all applicable project documentation.

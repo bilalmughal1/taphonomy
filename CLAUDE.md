@@ -1,3 +1,44 @@
+# 0. Non-Negotiable Rules
+
+These rules override every other instruction in this document.
+They are not subject to interpretation, convenience, or exception.
+
+## 0.1 Authorship and Attribution
+
+Taphonomy is authored solely by Fahad Bilal Saleem.
+
+Coding agents must never:
+
+* add a `Co-Authored-By` trailer to any commit message
+* add "Generated with", "Created by", "Assisted by", or any similar
+  attribution to a commit message, pull request, code comment, documentation
+  file, or file header
+* name Claude, Claude Code, Anthropic, or any other AI tool anywhere in the
+  repository's tracked content, commit history, or metadata
+* claim, imply, or record authorship or co-authorship of any change
+
+Any such attribution is a defect. If an agent is uncertain whether text
+constitutes attribution, it must omit the text.
+
+## 0.2 Version Control
+
+All commits and pushes are performed manually by the author, in the terminal.
+
+Coding agents must never run:
+
+* `git commit`
+* `git push`
+* `git tag`
+* `git merge`, `git rebase`, `git reset`, `git revert`, `git cherry-pick`
+* `git filter-branch`, `git gc --prune`, or any history-rewriting command
+* any command that contacts a remote
+
+Coding agents may run read-only git commands such as `status`, `diff`, `log`,
+`show`, `ls-files`, and `check-ignore`. They may run `git mv` only when
+explicitly instructed, and must report the result.
+
+An agent that believes a commit is required must stop and say so.
+
 # Taphonomy Agent Instructions
 
 ## 1. Purpose

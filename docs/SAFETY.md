@@ -622,7 +622,7 @@ Agents must not:
 * remove safety validation to make tests pass
 * claim functionality that has not been tested
 
-Agent instructions are maintained in `AGENTS.md`.
+Agent instructions are maintained in `CLAUDE.md`.
 
 ---
 
