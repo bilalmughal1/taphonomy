@@ -14,6 +14,7 @@
 pub mod error;
 pub mod evidence;
 pub mod hash;
+pub mod partition;
 
 pub use error::Error;
 pub use evidence::EvidenceFile;

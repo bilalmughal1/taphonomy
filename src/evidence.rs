@@ -86,4 +86,20 @@ impl EvidenceFile {
 
         hash_reader(&mut self.file).map_err(|e| Error::from_io(&self.path, e))
     }
+
+    /// Reads exactly `buf.len()` bytes starting at `offset`.
+    ///
+    /// Fails if the evidence ends before the buffer is filled. A short read
+    /// is never silently treated as a complete one.
+    pub fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| Error::from_io(&self.path, e))?;
+
+        self.file
+            .read_exact(buf)
+            .map_err(|e| Error::from_io(&self.path, e))
+    }
 }
