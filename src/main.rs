@@ -8,6 +8,7 @@
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
+use taphonomy::filesystem::{Identification, VBR_SIZE, declared_type_matches, identify};
 use taphonomy::partition::{PartitionTable, SECTOR_SIZE, parse_mbr};
 
 fn main() -> ExitCode {
@@ -70,6 +71,76 @@ fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
                                     p.sector_count,
                                     p.is_bootable()
                                 );
+                            }
+
+                            println!();
+                            for p in &partitions {
+                                let mut vbr = [0u8; VBR_SIZE];
+                                match evidence.read_exact_at(p.start_byte(), &mut vbr) {
+                                    Ok(()) => {
+                                        let id = identify(&vbr);
+
+                                        match &id {
+                                            Identification::Identified { filesystem, .. } => {
+                                                println!(
+                                                    "partition {}   filesystem {filesystem}",
+                                                    p.index
+                                                );
+                                            }
+                                            Identification::Unknown { reason } => {
+                                                println!(
+                                                    "partition {}   filesystem unknown ({reason})",
+                                                    p.index
+                                                );
+                                            }
+                                        }
+
+                                        if let Identification::Identified {
+                                            geometry: Some(g),
+                                            ..
+                                        } = &id
+                                        {
+                                            println!(
+                                                "    bytes per sector     {}",
+                                                g.bytes_per_sector
+                                            );
+                                            println!(
+                                                "    sectors per cluster  {}",
+                                                g.sectors_per_cluster
+                                            );
+                                            println!(
+                                                "    cluster count        {}",
+                                                g.cluster_count
+                                            );
+                                            println!(
+                                                "    first data sector    {}",
+                                                g.first_data_sector()
+                                            );
+                                        }
+
+                                        if let Some(filesystem) = id.filesystem()
+                                            && declared_type_matches(p.partition_type, filesystem)
+                                                == Some(false)
+                                        {
+                                            println!(
+                                                "    MISMATCH: declared type {:#04x} disagrees with observed filesystem {filesystem}",
+                                                p.partition_type
+                                            );
+                                        }
+
+                                        if let Identification::Identified { observations, .. } = &id
+                                            && !observations.is_empty()
+                                        {
+                                            println!("    observations");
+                                            for o in observations {
+                                                println!("      {o:?}");
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("error: partition {}: {e}", p.index);
+                                    }
+                                }
                             }
                         }
                         PartitionTable::GptProtective => {
