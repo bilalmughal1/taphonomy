@@ -9,16 +9,16 @@ The project is designed around evidence preservation, correctness, security, rep
 Taphonomy has a validated read-only evidence layer. No recovery capability is
 implemented yet.
 
-Milestone M1 of ADR-0002 §8 is complete: evidence images are opened
-read-only, hashed with SHA-256, and their size is reported; hashing is
-verified against NIST FIPS 180-4 vectors; evidence immutability is verified
-by test.
+Milestones M1 and M2 of ADR-0002 §8 are complete: evidence images are opened
+read-only and hashed, and MBR partition tables are parsed with every
+declared extent validated against the true evidence size. GPT is detected
+and reported as unsupported.
 
 The initial development sequence is:
 
 1. ~~Establish project, safety, security, and architecture contracts.~~ Done.
 2. ~~Build a read-only evidence abstraction.~~ Done.
-3. Build a synthetic evidence laboratory.
+3. ~~Build a synthetic evidence laboratory.~~ Done.
 4. Implement one narrowly defined recovery capability.
 5. Validate recovery accuracy, including false positives.
 6. Add regression, property, integration, and fuzz testing where appropriate.
@@ -239,7 +239,8 @@ At this stage:
 
 * no recovery capability is implemented
 * no filesystem parsing is implemented
-* partition detection is not implemented
+* only MBR partition tables are parsed; GPT is detected but not parsed
+* only 512-byte sectors are supported
 * physical-device recovery is not supported
 * recovery accuracy has not yet been established
 * filesystem support has not yet been validated
