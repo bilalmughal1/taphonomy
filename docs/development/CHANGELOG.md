@@ -19,3 +19,9 @@ history.
   (ADR-0005 §4)
 - Deterministic synthetic fixture generation for partition parsing
 - Positional evidence reads via `EvidenceFile::read_exact_at`
+- Filesystem identification from volume boot record structure (ADR-0002 M3)
+- FAT variant determined by data-region cluster count per the FAT
+  specification, not by the advisory type string at offset 0x52
+- Detection of disagreement between declared MBR partition type and observed
+  filesystem
+- exFAT and NTFS recognised and reported as unsupported

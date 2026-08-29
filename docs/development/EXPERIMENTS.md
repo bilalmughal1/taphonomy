@@ -174,3 +174,14 @@ FAT32.
 2. Add a regression check comparing regenerated fixtures against the manifest
    when the toolchain changes.
 3. Proceed to the MBR parser, using these fixtures as its test inputs.
+
+### Re-measurement 2026-08-30
+
+The fixture set grew to eight with the addition of `mbr-type-mismatch.img`.
+`verify-fixtures.sh` was re-run and reported 8 of 8 byte-identical.
+
+```text
+Deterministic: 8/8 fixtures byte-identical across runs.
+```
+
+The conclusion is unchanged.
