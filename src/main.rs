@@ -8,6 +8,7 @@
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
+use taphonomy::partition::{PartitionTable, SECTOR_SIZE, parse_mbr};
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -45,6 +46,49 @@ fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
         println!();
         println!("WARNING: bytes read does not match reported size.");
         println!("The digest covers {} bytes only.", result.bytes_read);
+    }
+
+    println!();
+    let mut sector = [0u8; SECTOR_SIZE];
+    match evidence.read_exact_at(0, &mut sector) {
+        Ok(()) => {
+            let image_sectors = result.bytes_read / SECTOR_SIZE as u64;
+            match parse_mbr(&sector, image_sectors) {
+                Ok(outcome) => {
+                    match outcome.table {
+                        PartitionTable::Mbr {
+                            disk_signature,
+                            partitions,
+                        } => {
+                            println!("disk signature  {disk_signature:#010x}");
+                            for p in &partitions {
+                                println!(
+                                    "partition {}   type {:#04x}   start {}   sectors {}   bootable {}",
+                                    p.index,
+                                    p.partition_type,
+                                    p.start_lba,
+                                    p.sector_count,
+                                    p.is_bootable()
+                                );
+                            }
+                        }
+                        PartitionTable::GptProtective => {
+                            println!("GPT detected: not supported");
+                        }
+                    }
+
+                    if !outcome.anomalies.is_empty() {
+                        println!();
+                        println!("anomalies");
+                        for a in &outcome.anomalies {
+                            println!("  {a:?}");
+                        }
+                    }
+                }
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
+        Err(e) => eprintln!("error: {e}"),
     }
 
     Ok(())
