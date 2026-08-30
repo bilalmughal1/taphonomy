@@ -368,9 +368,18 @@ pub fn parse_boot_sector(
 
     let ext_flags = le_u16(sector, OFF_EXT_FLAGS);
     if ext_flags & EXT_FLAGS_MIRRORING_DISABLED != 0 {
-        observations.push(Fat32Observation::FatMirroringDisabled {
-            active_fat: (ext_flags & EXT_FLAGS_ACTIVE_FAT) as u8,
-        });
+        // Bits 0-3 index the active FAT. An index at or beyond the
+        // declared FAT count names a table that does not exist, and any
+        // offset computed from it would land in the data region and be
+        // read as allocation entries.
+        let active = (ext_flags & EXT_FLAGS_ACTIVE_FAT) as u8;
+        if active >= geometry.fat_count {
+            return Err(Fat32Error::InvalidField {
+                field: "active_fat",
+                value: active as u64,
+            });
+        }
+        observations.push(Fat32Observation::FatMirroringDisabled { active_fat: active });
     }
 
     // The label fields carry meaning only when the boot signature says so.
@@ -628,6 +637,22 @@ mod tests {
             boot.observations
                 .contains(&Fat32Observation::FatMirroringDisabled { active_fat: 1 })
         );
+    }
+
+    /// Bits 0-3 name a FAT that must exist. The fixture declares two.
+    #[test]
+    fn active_fat_beyond_the_fat_count_is_refused() {
+        let mut s = fat32_boot_sector();
+        // Mirroring disabled, FAT 2 active, but only FATs 0 and 1 exist.
+        s[OFF_EXT_FLAGS..OFF_EXT_FLAGS + 2].copy_from_slice(&0x0082u16.to_le_bytes());
+
+        assert!(matches!(
+            parse_boot_sector(&s, FIXTURE_EXTENT),
+            Err(Fat32Error::InvalidField {
+                field: "active_fat",
+                ..
+            })
+        ));
     }
 
     #[test]
