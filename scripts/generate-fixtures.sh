@@ -12,6 +12,7 @@
 #   sfdisk       util-linux
 #   sgdisk       gdisk
 #   mkfs.vfat    dosfstools
+#   mcopy, mmd   mtools
 #
 # No root privileges are required. No loop devices are used. No filesystem is
 # mounted. Every image is a regular file.
@@ -19,6 +20,12 @@
 # Determinism: mkfs.vfat --invariant fixes values that would otherwise derive
 # from the clock or a random source. Repeated runs of this script must produce
 # byte-identical images. That property is checked by verify-fixtures.sh.
+#
+# mtools writes wall-clock time into directory entries, and FAT stores
+# those timestamps in local time with no timezone field. SOURCE_DATE_EPOCH
+# and TZ are therefore both exported below: either alone leaves fixture
+# bytes dependent on when or where the script runs. Measured in ADR-0006
+# section 4.
 
 set -euo pipefail
 
@@ -28,6 +35,10 @@ readonly IMAGE_SECTORS=131072     # 64 MiB
 readonly FAT32_LABEL="TAPHFIX"
 readonly VBR_OFFSET=$((PART_START * SECTOR))   # 1048576, byte offset of the
                                                # volume boot record
+
+# Pins every timestamp mtools writes. See ADR-0006 section 4.
+export SOURCE_DATE_EPOCH=1577836800   # 2020-01-01 00:00:00 UTC
+export TZ=UTC
 
 OUT_DIR="${1:-fixtures/partition}"
 readonly OUT_DIR
@@ -42,6 +53,8 @@ require() {
 require sfdisk "apt install util-linux"
 require sgdisk "apt install gdisk"
 require mkfs.vfat "apt install dosfstools"
+require mcopy "apt install mtools"
+require mmd "apt install mtools"
 require sha256sum coreutils
 
 mkdir -p "$OUT_DIR"
@@ -365,6 +378,55 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 13. FAT32 volume with entries in its root directory.
+#     Every other fixture is an empty filesystem. This one carries the four
+#     root-entry shapes M5 must enumerate: a pure 8.3 name, a lowercase 8.3
+#     name recorded through the NTRes flags, a name too long for 8.3 which
+#     produces preceding attribute-0x0F entries, and a subdirectory.
+#     The volume label written by mkfs.vfat -n is a fifth shape,
+#     attribute 0x08.
+#
+#     File contents are fixed short strings so that later milestones have
+#     known-good data to recover and hash against.
+# ---------------------------------------------------------------------------
+fixture_fat32_root_entries() {
+    local path="$OUT_DIR/fat32-root-entries.img"
+    printf 'fat32-root-entries.img\n'
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730005
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work
+    work="$(mktemp -d)"
+
+    printf 'taphonomy hello fixture\n' > "$work/hello.txt"
+    printf 'taphonomy readme fixture\n' > "$work/readme.md"
+    printf 'taphonomy long name fixture\n' > "$work/annual.txt"
+
+    # Order is fixed, so directory entry order is deterministic.
+    MTOOLS_SKIP_CHECK=1 mcopy -i "${path}@@${VBR_OFFSET}" \
+        "$work/hello.txt" ::/HELLO.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "${path}@@${VBR_OFFSET}" \
+        "$work/readme.md" ::/readme.md
+    MTOOLS_SKIP_CHECK=1 mcopy -i "${path}@@${VBR_OFFSET}" \
+        "$work/annual.txt" "::/annual report 2019.txt"
+    MTOOLS_SKIP_CHECK=1 mmd -i "${path}@@${VBR_OFFSET}" ::/logs
+
+    rm -rf "$work"
+
+    note "root directory with 8.3, lowercase, long-name and directory entries"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -380,6 +442,7 @@ fixture_fat32_oversized_volume
 fixture_fat32_hidden_mismatch
 fixture_fat32_bad_root_cluster
 fixture_fat32_undersized_fat
+fixture_fat32_root_entries
 
 # ---------------------------------------------------------------------------
 # Manifest

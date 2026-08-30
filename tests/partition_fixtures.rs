@@ -4,7 +4,7 @@
 //! these tests. Their expected digests are recorded in
 //! `fixtures/partition/MANIFEST.sha256`.
 //!
-//! Eight of the twelve fixtures exist to make the parser fail or to carry
+//! Eight of the thirteen fixtures exist to make the parser fail or to carry
 //! a defect worth reporting. A parser tested only against valid input has
 //! been demonstrated, not tested.
 

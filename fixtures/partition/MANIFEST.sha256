@@ -2,6 +2,7 @@
 ba4f1f20853b3c9ceda0eae503346bf3eb4dd02f93b52a00285b785fac33cccc  ./fat32-bad-root-cluster.img
 c14c1dddf21dd458d3e7b60434a93b36bba1f6c36ebbd95622d822a355254fba  ./fat32-hidden-mismatch.img
 6bac910972cde75d292a1752cc399c82cfe1bc8f9c84e4b26f83d746c63a9593  ./fat32-oversized-volume.img
+7ea4a2b1491706514d13a5ce26ea194d78e48c0100133c218f5a7cf8910335f9  ./fat32-root-entries.img
 7a75c446ece747aa657e1b6f86fe2dbaeb66ed4a64c0abc8aa4e69d6c127f08b  ./fat32-undersized-fat.img
 95f5fb4964f0d9a59b703990337850378f05e44e6eda8e2c1b1ab2f1f6e70e19  ./gpt-protective.img
 cd80ded1e925565e17e8b5c3c13f36ab46dd547e746fd0e270683494c15b40e4  ./mbr-empty.img
