@@ -27,6 +27,13 @@ history.
 - exFAT and NTFS recognised and reported as unsupported
 - Partition anomalies and filesystem observations reported as readable
   text rather than debug-formatted structures
+- FAT32 boot sector parsing validated against the partition extent
+  (ADR-0002 M4)
+- Detection of a volume declaring more sectors than its partition holds,
+  a root directory cluster outside the data region, and a file allocation
+  table too small for the clusters declared
+- Reporting of a hidden sector count that records a start the volume does
+  not have
 
 ### Changed
 
