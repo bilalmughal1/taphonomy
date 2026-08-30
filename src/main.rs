@@ -133,7 +133,7 @@ fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
                                         {
                                             println!("    observations");
                                             for o in observations {
-                                                println!("      {o:?}");
+                                                println!("      {o}");
                                             }
                                         }
                                     }
@@ -152,7 +152,7 @@ fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
                         println!();
                         println!("anomalies");
                         for a in &outcome.anomalies {
-                            println!("  {a:?}");
+                            println!("  {a}");
                         }
                     }
                 }

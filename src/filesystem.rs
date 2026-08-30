@@ -118,6 +118,28 @@ pub enum Observation {
     UnprintableOemName,
 }
 
+/// The `declared` field of `TypeStringDisagrees` originates in evidence.
+/// `printable_ascii` restricts it to bytes 0x20..=0x7E before it can reach
+/// this type, so it cannot carry control characters, newlines or terminal
+/// escape sequences. Widening `printable_ascii` would invalidate that.
+impl fmt::Display for Observation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Observation::TypeStringDisagrees { declared, computed } => write!(
+                f,
+                "type string declares {declared}, computed variant is {computed}"
+            ),
+            Observation::UnusualFatCount { count } => {
+                write!(f, "volume declares {count} FATs, 2 is conventional")
+            }
+            Observation::NonStandardSectorSize { bytes } => {
+                write!(f, "sector size is {bytes} bytes, not 512")
+            }
+            Observation::UnprintableOemName => f.write_str("OEM name field is not printable ASCII"),
+        }
+    }
+}
+
 /// The result of examining a volume boot record.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Identification {
@@ -441,5 +463,29 @@ mod tests {
         assert_eq!(declared_type_matches(0x07, Filesystem::Ntfs), Some(true));
         assert_eq!(declared_type_matches(0x07, Filesystem::ExFat), Some(true));
         assert_eq!(declared_type_matches(0x83, Filesystem::Fat32), None);
+    }
+
+    #[test]
+    fn observation_display_is_human_readable() {
+        let observations = [
+            Observation::TypeStringDisagrees {
+                declared: "FAT32".to_string(),
+                computed: Filesystem::Fat32,
+            },
+            Observation::UnusualFatCount { count: 1 },
+            Observation::NonStandardSectorSize { bytes: 4096 },
+            Observation::UnprintableOemName,
+        ];
+
+        for o in &observations {
+            let rendered = o.to_string();
+            assert!(!rendered.is_empty());
+            assert!(
+                !rendered.contains('{') && !rendered.contains('}'),
+                "Debug-style struct syntax leaked into Display output: {rendered:?}"
+            );
+        }
+
+        assert!(observations[0].to_string().contains("FAT32"));
     }
 }

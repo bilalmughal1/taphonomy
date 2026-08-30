@@ -130,6 +130,32 @@ pub enum Anomaly {
     EntriesOutOfOrder,
 }
 
+impl fmt::Display for Anomaly {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Anomaly::InvalidBootIndicator { index, value } => write!(
+                f,
+                "partition {index} boot indicator is {value:#04x}, expected 0x00 or 0x80"
+            ),
+            Anomaly::MultipleBootablePartitions { count } => write!(
+                f,
+                "{count} partitions are marked bootable, expected at most 1"
+            ),
+            Anomaly::OverlappingPartitions { first, second } => write!(
+                f,
+                "partitions {first} and {second} occupy overlapping sectors"
+            ),
+            Anomaly::NonZeroUnusedEntry { index } => write!(
+                f,
+                "partition entry {index} is marked unused but is not zero-filled"
+            ),
+            Anomaly::EntriesOutOfOrder => {
+                f.write_str("partition entries are not in ascending start order")
+            }
+        }
+    }
+}
+
 /// A reason the first sector could not be interpreted.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ParseError {
@@ -531,5 +557,33 @@ mod tests {
         let mut s = blank_sector();
         s.extend_from_slice(&[0u8; 512]);
         parse_mbr(&s, 1000).expect("extra bytes beyond the sector are ignored");
+    }
+
+    #[test]
+    fn anomaly_display_is_human_readable() {
+        let anomalies = [
+            Anomaly::InvalidBootIndicator {
+                index: 1,
+                value: 0x42,
+            },
+            Anomaly::MultipleBootablePartitions { count: 2 },
+            Anomaly::OverlappingPartitions {
+                first: 1,
+                second: 2,
+            },
+            Anomaly::NonZeroUnusedEntry { index: 3 },
+            Anomaly::EntriesOutOfOrder,
+        ];
+
+        for a in &anomalies {
+            let rendered = a.to_string();
+            assert!(!rendered.is_empty());
+            assert!(
+                !rendered.contains('{') && !rendered.contains('}'),
+                "Debug-style struct syntax leaked into Display output: {rendered:?}"
+            );
+        }
+
+        assert!(anomalies[0].to_string().contains("0x42"));
     }
 }
