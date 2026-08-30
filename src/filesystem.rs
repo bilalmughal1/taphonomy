@@ -25,6 +25,24 @@ use crate::fat::{self, FatGeometry};
 /// Bytes in a volume boot record.
 pub const VBR_SIZE: usize = 512;
 
+/// Where a volume sits within the evidence, in 512-byte sectors.
+///
+/// A volume boot record describes the volume's own geometry. It cannot
+/// describe whether that geometry fits the space the volume occupies.
+/// That check needs the extent, which comes from the partition table or,
+/// for a volume written without one, from the evidence size.
+///
+/// The two fields are a named pair rather than two arguments because
+/// both are sector counts of the same type, and transposing them at a
+/// call site would compile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct VolumeExtent {
+    /// First sector of the volume, relative to the start of the evidence.
+    pub start_lba: u32,
+    /// Length of the volume in sectors.
+    pub sector_count: u32,
+}
+
 pub(crate) const OFF_JUMP: usize = 0x00;
 pub(crate) const OFF_OEM: usize = 0x03;
 pub(crate) const OFF_SIGNATURE: usize = 0x1FE;
@@ -487,5 +505,23 @@ mod tests {
         }
 
         assert!(observations[0].to_string().contains("FAT32"));
+    }
+
+    #[test]
+    fn volume_extent_is_copy_and_comparable() {
+        let a = VolumeExtent {
+            start_lba: 2048,
+            sector_count: 129_024,
+        };
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(
+            a,
+            VolumeExtent {
+                start_lba: 129_024,
+                sector_count: 2048,
+            },
+            "a transposed extent must not compare equal"
+        );
     }
 }
