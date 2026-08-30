@@ -13,6 +13,7 @@
 
 pub mod error;
 pub mod evidence;
+pub mod fat;
 pub mod filesystem;
 pub mod hash;
 pub mod partition;
