@@ -204,3 +204,30 @@ Deterministic: 12/12 fixtures byte-identical across runs.
 The conclusion is unchanged. Determinism now covers byte-level
 corruption applied after `mkfs.vfat`, which the original measurement did
 not exercise.
+
+### Re-measurement 2026-08-30 (third)
+
+`fat32-hidden-mismatch.img` was regenerated. The original poked zero into
+`BPB_HiddSec`, which measurement showed was already the value `mkfs.vfat`
+writes for a volume formatted with `--offset`:
+
+```text
+xxd -s 1048576 -l 96 fixtures/partition/mbr-single-fat32.img
+  00100010: 0200 0000 00f8 0000 2000 0800 0000 0000
+```
+
+Bytes `0x1C` through `0x1F` are zero. The fixture therefore differed from
+`mbr-single-fat32.img` only in its label-id and tested nothing. It now
+pokes 9999, a start the volume could not have had.
+
+`verify-fixtures.sh` was re-run and reported 12 of 12 byte-identical.
+
+```text
+Deterministic: 12/12 fixtures byte-identical across runs.
+```
+
+One manifest digest changed, `fat32-hidden-mismatch.img` from
+`1dd69836...` to `c14c1ddd...`. The other eleven are unchanged, which is
+the property the manifest exists to establish.
+
+The conclusion is unchanged.

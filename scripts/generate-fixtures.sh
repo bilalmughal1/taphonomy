@@ -286,8 +286,10 @@ EOF
 
 # ---------------------------------------------------------------------------
 # 10. FAT32 hidden sector count disagrees with the partition start.
-#     HiddSec at BPB offset 0x1C is corrupted to 0, claiming the volume
-#     starts at LBA 0, while the enclosing partition starts at LBA 2048.
+#     mkfs.vfat writes zero to BPB_HiddSec for a volume formatted at an
+#     offset, so poking zero changes nothing. HiddSec at BPB offset 0x1C
+#     is corrupted to 9999 instead, a value the volume could not have
+#     started at.
 # ---------------------------------------------------------------------------
 fixture_fat32_hidden_mismatch() {
     local path="$OUT_DIR/fat32-hidden-mismatch.img"
@@ -305,9 +307,9 @@ EOF
         --offset="$PART_START" "$path" \
         $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
 
-    poke_le32 "$path" $((VBR_OFFSET + 0x1C)) 0
+    poke_le32 "$path" $((VBR_OFFSET + 0x1C)) 9999
 
-    note "hidden sector count disagrees with the partition start"
+    note "hidden sector count records a start the volume does not have"
 }
 
 # ---------------------------------------------------------------------------
