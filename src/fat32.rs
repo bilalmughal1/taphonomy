@@ -125,8 +125,9 @@ pub enum Fat32Observation {
     ///
     /// The volume records its own starting sector. Disagreement is evidence
     /// the image was carved, the partition table was rebuilt, or the volume
-    /// was copied from a different layout. It is not an error, because many
-    /// tools write zero here.
+    /// was copied from a different layout. A declared zero is exempt: it
+    /// means the field was never recorded, which is what mkfs.vfat writes
+    /// for a volume formatted at an offset.
     HiddenSectorsDisagree { declared: u32, actual: u32 },
     /// The volume occupies less than its extent provides.
     ///
@@ -344,8 +345,14 @@ pub fn parse_boot_sector(
         });
     }
 
+    // A declared zero means the formatting tool did not record the field.
+    // mkfs.vfat writes zero for any volume it formats at an offset, so
+    // treating that as disagreement would fire on conformant evidence and
+    // teach the reader to ignore the category. A non-zero value that does
+    // not match is a genuine finding: the volume records a start it does
+    // not have.
     let hidden_sectors = le_u32(sector, OFF_HIDDEN_SECTORS);
-    if hidden_sectors != extent.start_lba {
+    if hidden_sectors != 0 && hidden_sectors != extent.start_lba {
         observations.push(Fat32Observation::HiddenSectorsDisagree {
             declared: hidden_sectors,
             actual: extent.start_lba,
@@ -497,15 +504,30 @@ mod tests {
     #[test]
     fn hidden_sector_disagreement_is_observed() {
         let mut s = fat32_boot_sector();
-        s[OFF_HIDDEN_SECTORS..OFF_HIDDEN_SECTORS + 4].copy_from_slice(&0u32.to_le_bytes());
+        s[OFF_HIDDEN_SECTORS..OFF_HIDDEN_SECTORS + 4].copy_from_slice(&9999u32.to_le_bytes());
 
         let boot = parse_boot_sector(&s, FIXTURE_EXTENT).expect("still a usable boot sector");
         assert!(
             boot.observations
                 .contains(&Fat32Observation::HiddenSectorsDisagree {
-                    declared: 0,
+                    declared: 9999,
                     actual: 2048,
                 })
+        );
+    }
+
+    /// Zero means the field was never recorded. Reporting it as
+    /// disagreement would fire on every volume mkfs.vfat produces.
+    #[test]
+    fn unrecorded_hidden_sectors_are_not_observed() {
+        let mut s = fat32_boot_sector();
+        s[OFF_HIDDEN_SECTORS..OFF_HIDDEN_SECTORS + 4].copy_from_slice(&0u32.to_le_bytes());
+
+        let boot = parse_boot_sector(&s, FIXTURE_EXTENT).expect("valid");
+        assert!(
+            boot.observations.is_empty(),
+            "a zero hidden-sector count is not a disagreement, got {:?}",
+            boot.observations
         );
     }
 
