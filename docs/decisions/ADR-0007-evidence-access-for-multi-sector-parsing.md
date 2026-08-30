@@ -289,3 +289,60 @@ Revisit if:
 * profiling shows per-read overhead dominates for large directories
 * physical-device support introduces read semantics a file-backed
   implementation does not capture
+
+---
+
+## Appendix A: Correction to §1 (2026-08-31)
+
+This appendix corrects two measurements in §1. The body above is left
+unmodified, consistent with the treatment of superseded content
+elsewhere in `docs/decisions/`.
+
+### A.1 The errors
+
+§1 states seven call sites of `read_exact_at`. Measured:
+
+```text
+grep -rn "read_exact_at" src/ tests/ | grep -v "pub fn read_exact_at"
+  src/main.rs:57
+  src/main.rs:113
+  tests/filesystem_fixtures.rs:43
+  tests/filesystem_fixtures.rs:58
+  tests/partition_fixtures.rs:41
+  tests/partition_fixtures.rs:191
+  tests/fat32_fixtures.rs:50
+  tests/fat32_fixtures.rs:76
+```
+
+Eight, not seven. The two in `tests/fat32_fixtures.rs` were added by
+`47b622e`, before this ADR was written.
+
+§1 states `src/fat32.rs` is 702 lines. Measured:
+
+```text
+wc -l src/fat32.rs
+  727 src/fat32.rs
+```
+
+702 was correct when measured, before `e010bd0` added 25 lines. The ADR
+was written after that commit using the earlier figure.
+
+### A.2 Effect on the decision
+
+**None.** Both figures support §6's argument that `src/fat32.rs` is the
+largest file in `src/` and that M5 belongs in a separate module; 727
+supports it more strongly than 702. The call-site count was cited as
+evidence that every existing read is a single fixed-size buffer, which
+remains true of all eight.
+
+### A.3 Cause
+
+The line count was carried across a commit that invalidated it. The
+call-site count was transcribed from an audit without being re-derived.
+Neither was checked against the working tree at the moment of writing.
+
+`ADR-0002` Appendix A §A.5 already requires that future ADRs state the
+command used to obtain any environmental claim. That was done here. What
+was not done was re-running those commands after the tree changed. A
+measurement is valid at an instant, and an ADR written later must
+re-measure rather than quote.
