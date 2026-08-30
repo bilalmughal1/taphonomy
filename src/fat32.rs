@@ -286,6 +286,13 @@ pub fn parse_boot_sector(
         });
     }
 
+    // BPB_Reserved at 0x34, twelve bytes, is not checked. The
+    // specification asks formatters to zero it but places no requirement
+    // on readers, so a non-zero value describes a volume that is still
+    // entirely readable. Refusing it would fail closed on recoverable
+    // evidence, and reporting it would be an observation with no action
+    // attached to it.
+
     // Both structures live in the reserved region, before the first FAT.
     // A sector number outside it points at data the volume is using for
     // something else.
