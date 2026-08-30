@@ -9,11 +9,12 @@ The project is designed around evidence preservation, correctness, security, rep
 Taphonomy has a validated read-only evidence layer. No recovery capability is
 implemented yet.
 
-Milestones M1 to M3 of ADR-0002 §8 are complete: evidence images are opened
-read-only and hashed, and MBR partition tables are parsed with every
-declared extent validated against the true evidence size. GPT is detected
-and reported as unsupported. Filesystems are identified from volume
-structure rather than from the declared partition type.
+Milestones M1 to M4 of ADR-0002 §8 are complete: evidence images are
+opened read-only and hashed, MBR partition tables are parsed with every
+declared extent validated against the true evidence size, GPT is detected
+and reported as unsupported, filesystems are identified from volume
+structure, and FAT32 boot sectors are parsed and validated against the
+partition extent they occupy.
 
 The initial development sequence is:
 
@@ -239,7 +240,9 @@ docs/decisions/
 At this stage:
 
 * no recovery capability is implemented
-* filesystems are identified but not parsed
+* only FAT32 boot sectors are parsed; no other filesystem is parsed
+* FAT32 support stops at the boot sector; the file allocation table and
+  directories are not read
 * no file or directory data is read
 * only MBR partition tables are parsed; GPT is detected but not parsed
 * only 512-byte sectors are supported
