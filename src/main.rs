@@ -8,7 +8,10 @@
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
-use taphonomy::filesystem::{Identification, VBR_SIZE, declared_type_matches, identify};
+use taphonomy::fat32::parse_boot_sector;
+use taphonomy::filesystem::{
+    Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
+};
 use taphonomy::partition::{MbrPartition, PartitionTable, SECTOR_SIZE, parse_mbr};
 
 fn main() -> ExitCode {
@@ -148,6 +151,45 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition) {
         println!("    observations");
         for o in observations {
             println!("      {o}");
+        }
+    }
+
+    if id.filesystem() != Some(Filesystem::Fat32) {
+        return;
+    }
+
+    let extent = VolumeExtent {
+        start_lba: p.start_lba,
+        sector_count: p.sector_count,
+    };
+
+    match parse_boot_sector(&vbr, extent) {
+        Ok(boot) => {
+            println!("    root cluster         {}", boot.root_cluster);
+            println!("    backup boot sector   {}", boot.backup_boot_sector);
+
+            match boot.active_fat() {
+                Some(n) => println!("    FAT mirroring        disabled, FAT {n} active"),
+                None => println!("    FAT mirroring        enabled"),
+            }
+
+            if let Some(id) = boot.volume_id {
+                println!("    volume id            {id:#010x}");
+            }
+
+            if let Some(label) = &boot.volume_label {
+                println!("    volume label         {label}");
+            }
+
+            if !boot.observations.is_empty() {
+                println!("    boot sector observations");
+                for o in &boot.observations {
+                    println!("      {o}");
+                }
+            }
+        }
+        Err(e) => {
+            println!("    BOOT SECTOR REJECTED: {e}");
         }
     }
 }
