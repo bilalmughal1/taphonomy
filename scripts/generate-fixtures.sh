@@ -26,6 +26,8 @@ readonly SECTOR=512
 readonly PART_START=2048          # 1 MiB, the conventional first-partition LBA
 readonly IMAGE_SECTORS=131072     # 64 MiB
 readonly FAT32_LABEL="TAPHFIX"
+readonly VBR_OFFSET=$((PART_START * SECTOR))   # 1048576, byte offset of the
+                                               # volume boot record
 
 OUT_DIR="${1:-fixtures/partition}"
 readonly OUT_DIR
@@ -61,6 +63,22 @@ poke() {
 
 note() {
     printf '  %s\n' "$1"
+}
+
+# Writes a 16-bit little-endian value at a byte offset.
+poke_le16() {
+    local path="$1" offset="$2" value="$3"
+    poke "$path" "$offset"       "$(( value & 0xff ))"
+    poke "$path" "$((offset+1))" "$(( (value >> 8) & 0xff ))"
+}
+
+# Writes a 32-bit little-endian value at a byte offset.
+poke_le32() {
+    local path="$1" offset="$2" value="$3"
+    poke "$path" "$offset"       "$(( value & 0xff ))"
+    poke "$path" "$((offset+1))" "$(( (value >> 8) & 0xff ))"
+    poke "$path" "$((offset+2))" "$(( (value >> 16) & 0xff ))"
+    poke "$path" "$((offset+3))" "$(( (value >> 24) & 0xff ))"
 }
 
 # ---------------------------------------------------------------------------
@@ -240,6 +258,111 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 9. FAT32 volume declares more sectors than its partition contains.
+#    TotSec32 at BPB offset 0x20 is corrupted to claim 200,000 sectors
+#    inside a 129,024-sector partition. Declared geometry must be checked
+#    against the partition's actual extent, not trusted outright.
+# ---------------------------------------------------------------------------
+fixture_fat32_oversized_volume() {
+    local path="$OUT_DIR/fat32-oversized-volume.img"
+    printf 'fat32-oversized-volume.img\n'
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730001
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    poke_le32 "$path" $((VBR_OFFSET + 0x20)) 200000
+
+    note "volume declares more sectors than its partition contains"
+}
+
+# ---------------------------------------------------------------------------
+# 10. FAT32 hidden sector count disagrees with the partition start.
+#     HiddSec at BPB offset 0x1C is corrupted to 0, claiming the volume
+#     starts at LBA 0, while the enclosing partition starts at LBA 2048.
+# ---------------------------------------------------------------------------
+fixture_fat32_hidden_mismatch() {
+    local path="$OUT_DIR/fat32-hidden-mismatch.img"
+    printf 'fat32-hidden-mismatch.img\n'
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730002
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    poke_le32 "$path" $((VBR_OFFSET + 0x1C)) 0
+
+    note "hidden sector count disagrees with the partition start"
+}
+
+# ---------------------------------------------------------------------------
+# 11. FAT32 root directory cluster number below the first valid cluster.
+#     RootClus at BPB offset 0x2C is corrupted to 1. Cluster numbers 0 and
+#     1 are reserved; the first valid cluster is 2.
+# ---------------------------------------------------------------------------
+fixture_fat32_bad_root_cluster() {
+    local path="$OUT_DIR/fat32-bad-root-cluster.img"
+    printf 'fat32-bad-root-cluster.img\n'
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730003
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    poke_le32 "$path" $((VBR_OFFSET + 0x2C)) 1
+
+    note "root directory cluster number below the first valid cluster"
+}
+
+# ---------------------------------------------------------------------------
+# 12. FAT32 FAT too small to describe the volume's cluster count.
+#     FATSz32 at BPB offset 0x24 is corrupted to 4 sectors, far too few to
+#     hold entries for the clusters the volume otherwise declares.
+# ---------------------------------------------------------------------------
+fixture_fat32_undersized_fat() {
+    local path="$OUT_DIR/fat32-undersized-fat.img"
+    printf 'fat32-undersized-fat.img\n'
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730004
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    poke_le32 "$path" $((VBR_OFFSET + 0x24)) 4
+
+    note "FAT too small to describe the volume's cluster count"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -251,6 +374,10 @@ fixture_bad_signature
 fixture_partition_beyond_end
 fixture_gpt_protective
 fixture_type_mismatch
+fixture_fat32_oversized_volume
+fixture_fat32_hidden_mismatch
+fixture_fat32_bad_root_cluster
+fixture_fat32_undersized_fat
 
 # ---------------------------------------------------------------------------
 # Manifest

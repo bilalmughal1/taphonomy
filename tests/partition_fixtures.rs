@@ -4,8 +4,9 @@
 //! these tests. Their expected digests are recorded in
 //! `fixtures/partition/MANIFEST.sha256`.
 //!
-//! Five of the seven fixtures exist to make the parser fail. A parser tested
-//! only against valid input has been demonstrated, not tested.
+//! Eight of the twelve fixtures exist to make the parser fail or to carry
+//! a defect worth reporting. A parser tested only against valid input has
+//! been demonstrated, not tested.
 
 use std::path::{Path, PathBuf};
 
