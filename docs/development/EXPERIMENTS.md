@@ -231,3 +231,182 @@ One manifest digest changed, `fat32-hidden-mismatch.img` from
 the property the manifest exists to establish.
 
 The conclusion is unchanged.
+
+---
+
+## EXP-0002: Determinism of mtools directory entry timestamps
+
+**Date:** 2026-08-30
+**Milestone:** M5 (ADR-0002 §8), prerequisite
+**Related:** ADR-0006 §4, §6; `DEVELOPMENT_ENVIRONMENT.md` §11, §12;
+`PROJECT.md` §6.4
+
+---
+
+### Question
+
+Does `mcopy` produce byte-identical output across runs, and if not, can its
+output be pinned?
+
+### Why it matters
+
+Every fixture before this one is an empty filesystem. M5 requires files
+inside a volume, and `mkfs.vfat` cannot create them.
+
+EXP-0001 established that fixture generation is deterministic and that
+`MANIFEST.sha256` may therefore be treated as a golden result under
+`DEVELOPMENT_ENVIRONMENT.md` §12. That finding was measured against tooling
+that writes no timestamps. FAT directory entries carry creation, write and
+access times, so a tool that populates them may break the property EXP-0001
+established.
+
+ADR-0002 Appendix A records a determinism claim written from assumption and
+later found unsupported. This experiment was run before ADR-0006 was drafted
+so that the same failure was not repeated.
+
+### Hypothesis
+
+`mcopy` writes the current time into `DIR_CrtTime` and `DIR_WrtTime`, making
+its output non-deterministic across runs separated by more than the field's
+two-second resolution.
+
+Predicted outcome: two runs in quick succession identical, two runs seconds
+apart differing in the directory entry.
+
+Confidence before running: high on the mechanism, low on whether a
+mitigation existed.
+
+### Input
+
+Four 64 MiB images built by identical procedure:
+
+```text
+dd if=/dev/zero of=IMAGE bs=512 count=131072
+sfdisk --quiet --no-tell-kernel IMAGE   (label-id 0x1a2b3c4d, one type=c
+                                         partition at LBA 2048)
+mkfs.vfat --invariant --mbr=n -F 32 -n TAPHFIX --offset=2048 IMAGE 64512
+MTOOLS_SKIP_CHECK=1 mcopy -i IMAGE@@1M payload.txt ::/payload.txt
+```
+
+`payload.txt` is 26 bytes, its mtime pinned with
+`touch -d '2020-01-01 00:00:00 UTC'`.
+
+All work was done in `/tmp`. No fixture in the repository was touched.
+
+### Environment
+
+```text
+Host       Ubuntu 24.04 (noble) under WSL2 on Windows
+mtools     4.0.43-1build1
+TZ         Asia/Dubai (UTC+4) unless stated otherwise
+```
+
+### Method
+
+Four comparisons:
+
+1. `a.img` and `b.img`, built consecutively with no delay.
+2. `a.img` and `c.img`, built five seconds apart.
+3. `d.img` and `e.img`, three seconds apart, with
+   `SOURCE_DATE_EPOCH=1577836800` exported.
+4. `d.img` and `f.img`, both with `SOURCE_DATE_EPOCH` set, `f.img`
+   additionally with `TZ=UTC`.
+
+Each comparison used `cmp`, and the resulting directory entry was decoded
+with `xxd` rather than relying on `cmp` alone. Two runs inside one clock
+tick compare equal without being deterministic, and `cmp` cannot distinguish
+that case.
+
+### Expected result
+
+Comparison 1 identical, comparison 2 differing.
+
+Comparisons 3 and 4 had no prediction. Whether `mtools` honours
+`SOURCE_DATE_EPOCH` was unknown before running.
+
+### Actual result
+
+**1. Same second: identical.**
+
+**2. Five seconds apart: differing.**
+
+```text
+cmp a.img c.img
+  a.img c.img differ: byte 2081839, line 5
+   2081839 263 320
+   2081847 263 320
+```
+
+Both bytes lie in the payload's root directory entry, at entry offsets
+`0x0E` (`DIR_CrtTime`) and `0x16` (`DIR_WrtTime`). Values moved from
+`0x98B3` to `0x98D0`, decoding as 19:05:38 to 19:06:32.
+
+Only the time fields moved because both runs fell on the same day. Across
+midnight the date fields would move as well.
+
+The payload's pinned mtime did not propagate: the recorded date was the
+current date, not 2020-01-01. `mcopy` does not preserve source modification
+time by default.
+
+**3. With `SOURCE_DATE_EPOCH=1577836800`: identical, and pinned.**
+
+```text
+001fc420: 5041 594c 4f41 4420 5458 5420 1800 0020  PAYLOAD TXT
+001fc430: 2150 2150 0000 0020 2150 0300 1a00 0000
+```
+
+`DIR_CrtDate` and `DIR_WrtDate` read `0x5021`: year field 40, so 1980+40 =
+2020, month 1, day 1. The identity is genuine rather than a clock-tick
+coincidence.
+
+**4. Adding `TZ=UTC`: different bytes for the same instant.**
+
+```text
+001fc420: 5041 594c 4f41 4420 5458 5420 1800 0000  PAYLOAD TXT
+001fc430: 2150 2150 0000 0000 2150 0300 1a00 0000
+
+cmp d.img f.img
+  d.img f.img differ: byte 2081840, line 5
+```
+
+`DIR_CrtTime` is `0x0000` (00:00:00) under `TZ=UTC` and `0x2000` (04:00:00)
+under UTC+4. `SOURCE_DATE_EPOCH=1577836800` is 2020-01-01 00:00:00 UTC in
+both cases.
+
+### Conclusion
+
+`mtools` is **not** deterministic as invoked. It becomes deterministic when
+both `SOURCE_DATE_EPOCH` and `TZ` are set. Either alone is insufficient:
+without the first, output depends on when the script runs; without the
+second, on where.
+
+FAT directory entries store local time with no timezone field, so the
+timezone dependence is a property of the filesystem format rather than of
+`mtools`, and no tool choice avoids it.
+
+`scripts/generate-fixtures.sh` exports both. EXP-0001's conclusion continues
+to hold for the fixture set, now including file-bearing fixtures, on the
+condition that those exports remain.
+
+### Limitations
+
+1. **Fixture bytes depend on the host timezone.** This is a new limitation.
+   EXP-0001 records that determinism across architectures and non-Linux
+   hosts is unmeasured; a timezone difference between two developers is far
+   more likely than either. The exports in the script are the mitigation,
+   and `verify-fixtures.sh` is the detection mechanism if they are removed.
+2. Measured on one host with `mtools` 4.0.43-1build1. Whether other versions
+   honour `SOURCE_DATE_EPOCH` identically is not established.
+3. Only `mcopy` was measured. `mmd`, used for the subdirectory in
+   `fat32-root-entries.img`, was not measured separately. It is covered
+   transitively: `verify-fixtures.sh` reports that fixture byte-identical
+   across runs, and it contains an `mmd`-created directory.
+4. Deleting a file with `mdel`, which M6 will require, was not measured.
+
+### Next action
+
+1. Record the decision and its licence reasoning in ADR-0006. **Done.**
+2. Export both variables in `scripts/generate-fixtures.sh`. **Done.**
+3. Add `fat32-root-entries.img` and confirm 13 of 13 byte-identical.
+   **Done.**
+4. Measure `mdel` determinism before M6 introduces deleted-entry fixtures.
