@@ -26,6 +26,14 @@ fn fixture(name: &str) -> PathBuf {
 
 /// Opens a fixture, parses its MBR, and returns the evidence handle with the
 /// partition list.
+///
+/// The sector count comes from `reported_size`, which is filesystem
+/// metadata rather than a count of bytes actually read. That is
+/// acceptable here only because every fixture is a complete regular
+/// file, where the two cannot differ. Production code must derive the
+/// bound from `HashResult::bytes_read`, as `src/main.rs` does, because
+/// on a block device or on media with unreadable sectors the metadata
+/// size overstates what can be read.
 fn open_partitions(name: &str) -> (EvidenceFile, Vec<MbrPartition>) {
     let mut evidence = EvidenceFile::open(fixture(name)).expect("opening fixture");
     let sectors = evidence.reported_size() / SECTOR_SIZE as u64;
