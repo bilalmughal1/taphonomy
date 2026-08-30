@@ -1,5 +1,5 @@
 {
   "rust-analyzer.check.command": "clippy",
-  "rust-analyzer.check.extraArgs": ["--all-targets", "--all-features"],
+  "rust-analyzer.check.features": "all",
   "editor.formatOnSave": true
 }
