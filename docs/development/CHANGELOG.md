@@ -34,6 +34,9 @@ history.
   table too small for the clusters declared
 - Reporting of a hidden sector count that records a start the volume does
   not have
+- FAT32 boot sector detail reported by the CLI, including root cluster,
+  backup boot sector location, FAT mirroring state, and volume label
+- Rejection of an active FAT index at or beyond the declared FAT count
 
 ### Changed
 

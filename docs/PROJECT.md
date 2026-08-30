@@ -343,9 +343,14 @@ A Taphonomy feature is complete only when:
 
 ## 11. Current Status
 
-Taphonomy is currently in the foundation phase.
+Taphonomy has a validated read-only evidence layer and a FAT32 boot
+sector parser. No recovery capability is implemented.
 
-No recovery functionality is considered implemented.
+Milestones M1 to M4 of ADR-0002 section 8 are complete. The next
+engineering objective is M5, enumerating the root directory.
 
-The next engineering objective is to establish the project's safety and development contracts before selecting and implementing the core technology stack.
+The technology stack is selected and recorded in ADR-0001. The safety
+and development contracts this section previously described as pending
+are established in `docs/SAFETY.md`, `SECURITY.md` and
+`docs/development/DEVELOPMENT_ENVIRONMENT.md`.
 
