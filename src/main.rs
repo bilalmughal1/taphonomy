@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
 use taphonomy::filesystem::{Identification, VBR_SIZE, declared_type_matches, identify};
-use taphonomy::partition::{PartitionTable, SECTOR_SIZE, parse_mbr};
+use taphonomy::partition::{MbrPartition, PartitionTable, SECTOR_SIZE, parse_mbr};
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
@@ -75,72 +75,7 @@ fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
 
                             println!();
                             for p in &partitions {
-                                let mut vbr = [0u8; VBR_SIZE];
-                                match evidence.read_exact_at(p.start_byte(), &mut vbr) {
-                                    Ok(()) => {
-                                        let id = identify(&vbr);
-
-                                        match &id {
-                                            Identification::Identified { filesystem, .. } => {
-                                                println!(
-                                                    "partition {}   filesystem {filesystem}",
-                                                    p.index
-                                                );
-                                            }
-                                            Identification::Unknown { reason } => {
-                                                println!(
-                                                    "partition {}   filesystem unknown ({reason})",
-                                                    p.index
-                                                );
-                                            }
-                                        }
-
-                                        if let Identification::Identified {
-                                            geometry: Some(g),
-                                            ..
-                                        } = &id
-                                        {
-                                            println!(
-                                                "    bytes per sector     {}",
-                                                g.bytes_per_sector
-                                            );
-                                            println!(
-                                                "    sectors per cluster  {}",
-                                                g.sectors_per_cluster
-                                            );
-                                            println!(
-                                                "    cluster count        {}",
-                                                g.cluster_count
-                                            );
-                                            println!(
-                                                "    first data sector    {}",
-                                                g.first_data_sector()
-                                            );
-                                        }
-
-                                        if let Some(filesystem) = id.filesystem()
-                                            && declared_type_matches(p.partition_type, filesystem)
-                                                == Some(false)
-                                        {
-                                            println!(
-                                                "    MISMATCH: declared type {:#04x} disagrees with observed filesystem {filesystem}",
-                                                p.partition_type
-                                            );
-                                        }
-
-                                        if let Identification::Identified { observations, .. } = &id
-                                            && !observations.is_empty()
-                                        {
-                                            println!("    observations");
-                                            for o in observations {
-                                                println!("      {o}");
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("error: partition {}: {e}", p.index);
-                                    }
-                                }
+                                report_partition(&mut evidence, p);
                             }
                         }
                         PartitionTable::GptProtective => {
@@ -163,4 +98,56 @@ fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
     }
 
     Ok(())
+}
+
+/// Reports the filesystem found in one partition.
+///
+/// A read or identification failure for one partition is reported and does
+/// not stop the others, nor change the process exit code: hashing already
+/// succeeded and that result stands on its own.
+fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition) {
+    let mut vbr = [0u8; VBR_SIZE];
+    if let Err(e) = evidence.read_exact_at(p.start_byte(), &mut vbr) {
+        eprintln!("error: partition {}: {e}", p.index);
+        return;
+    }
+
+    let id = identify(&vbr);
+
+    match &id {
+        Identification::Identified { filesystem, .. } => {
+            println!("partition {}   filesystem {filesystem}", p.index);
+        }
+        Identification::Unknown { reason } => {
+            println!("partition {}   filesystem unknown ({reason})", p.index);
+        }
+    }
+
+    if let Identification::Identified {
+        geometry: Some(g), ..
+    } = &id
+    {
+        println!("    bytes per sector     {}", g.bytes_per_sector);
+        println!("    sectors per cluster  {}", g.sectors_per_cluster);
+        println!("    cluster count        {}", g.cluster_count);
+        println!("    first data sector    {}", g.first_data_sector());
+    }
+
+    if let Some(filesystem) = id.filesystem()
+        && declared_type_matches(p.partition_type, filesystem) == Some(false)
+    {
+        println!(
+            "    MISMATCH: declared type {:#04x} disagrees with observed filesystem {filesystem}",
+            p.partition_type
+        );
+    }
+
+    if let Identification::Identified { observations, .. } = &id
+        && !observations.is_empty()
+    {
+        println!("    observations");
+        for o in observations {
+            println!("      {o}");
+        }
+    }
 }
