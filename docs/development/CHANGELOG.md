@@ -25,3 +25,11 @@ history.
 - Detection of disagreement between declared MBR partition type and observed
   filesystem
 - exFAT and NTFS recognised and reported as unsupported
+- Partition anomalies and filesystem observations reported as readable
+  text rather than debug-formatted structures
+
+### Changed
+
+- FAT BIOS parameter block parsing and variant determination moved from
+  `filesystem.rs` into a dedicated `fat` module; `filesystem.rs` retains
+  generic identification only
