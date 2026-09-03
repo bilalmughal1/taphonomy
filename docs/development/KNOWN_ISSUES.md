@@ -24,8 +24,16 @@ reading FAT 0 would otherwise produce the same result as one reading
 FAT 1.
 
 `parse_boot_sector` validates the active FAT index against the declared
-FAT count, and that check has unit coverage. What is untested is any
-code that acts on the index.
+FAT count, and that check has unit coverage. Code that acts on the index
+now exists: `enumerate_root` reads the FAT named by `BPB_ExtFlags` when
+mirroring is disabled, and FAT 0 otherwise. It is covered by
+`the_active_fat_is_read_when_mirroring_is_disabled`, which builds a volume
+in memory with `ExtFlags` set to `0x0081`, a stale chain in FAT 0 and the
+maintained chain in FAT 1.
+
+What remains untested is the path against evidence a formatting tool
+produced. No fixture reaches it, and none can until the fixture described
+above exists.
 
 ## Long filename patent status unverified
 
