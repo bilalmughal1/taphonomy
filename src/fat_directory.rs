@@ -362,8 +362,13 @@ pub struct RootDirectory {
 }
 
 impl RootDirectory {
-    /// Entries that are neither long-name components nor the volume label.
-    pub fn file_count(&self) -> usize {
+    /// Short entries: files and subdirectories, but not long-name
+    /// components and not the volume label.
+    ///
+    /// Named for what it counts rather than for files, because a
+    /// subdirectory is a short entry too and a reader who assumes otherwise
+    /// will be wrong by the number of subdirectories present.
+    pub fn short_entry_count(&self) -> usize {
         self.entries
             .iter()
             .filter(|e| matches!(e.kind, EntryKind::ShortName { .. }))
@@ -986,7 +991,7 @@ mod tests {
 
         assert_eq!(root.clusters, vec![2]);
         assert_eq!(root.entries.len(), 3, "the terminator is not an entry");
-        assert_eq!(root.file_count(), 2);
+        assert_eq!(root.short_entry_count(), 2);
         assert!(root.observations.is_empty(), "got {:?}", root.observations);
     }
 
@@ -1034,7 +1039,7 @@ mod tests {
 
         assert_eq!(root.clusters, vec![2, 19]);
         assert_eq!(root.entries.len(), 21);
-        assert_eq!(root.file_count(), 20);
+        assert_eq!(root.short_entry_count(), 20);
         assert_eq!(
             root.entries[16].cluster, 19,
             "an entry records the cluster it was read from"
