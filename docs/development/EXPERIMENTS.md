@@ -470,3 +470,334 @@ condition that those exports remain.
 3. Add `fat32-root-entries.img` and confirm 13 of 13 byte-identical.
    **Done.**
 4. Measure `mdel` determinism before M6 introduces deleted-entry fixtures.
+
+---
+
+## EXP-0003: What mtools deletion destroys, and whether it is deterministic
+
+**Date:** 2026-09-04
+**Milestone:** M6 (ADR-0002 §8), prerequisite
+**Related:** ADR-0003 §3; ADR-0006 §4, §5.1; ADR-0007 §5.3; ADR-0008 §12.2;
+EXP-0002 Limitations 4 and Next action 4; `KNOWN_ISSUES.md`
+
+---
+
+### Question
+
+Two questions, folded into one experiment because they share a volume.
+
+1. Is `mdel` deterministic under `SOURCE_DATE_EPOCH` and `TZ=UTC`?
+2. What does `mdel` actually destroy, and what survives?
+
+A third was added before the experiment ran. `mdel` deletes files. It does
+not delete directories, and M6 requires a fixture containing a deleted
+subdirectory. `mrd` and `mdeltree` are therefore measured alongside it, and
+their determinism and destruction behaviour were as unmeasured as `mdel`'s.
+
+### Why it matters
+
+EXP-0002 measured `mcopy` and, transitively, `mmd`. Deletion was not
+measured, and `KNOWN_ISSUES.md` records it as required before M6 introduces
+deleted-entry fixtures.
+
+Question 2 is the one that decides what an M6 fixture can prove. Deletion
+behaviour is implementation-specific rather than specified: the FAT32
+specification states that a first byte of `0xE5` marks a free entry, and
+says nothing about what else an implementation may do at the same time.
+Microsoft implementations are widely reported to zero the high word of the
+first cluster, which the specification does not require. If `mtools` does
+not, a fixture built with it will not exercise that case, and the tool will
+appear more capable against fixtures than against evidence from a Windows
+host.
+
+That is the "what a fixture proves versus what it illustrates" problem
+recorded in ADR-0008 §8.1, in its second instance.
+
+### Hypothesis
+
+Recorded before the experiment was run.
+
+1. `mdel` is deterministic, and would be even without the exports, because
+   deletion writes no timestamp. The exports remain necessary for the
+   `mcopy` steps that build the volume. Confidence: high on the mechanism,
+   moderate on whether `mtools` touches anything else.
+2. `mdel` writes `0xE5` into byte 0 of the short entry and of every
+   preceding long-name entry. High.
+3. `mdel` zeroes the file's cluster chain in the FAT. High.
+4. `mdel` does **not** zero `DIR_FstClusHI`, and does not zero
+   `DIR_FstClusLO`. Moderate.
+5. Name bytes 1 to 10, `DIR_Attr`, `DIR_NTRes`, all timestamps,
+   `DIR_FileSize` and the long-name checksum byte at `LDIR_Chksum` survive
+   untouched. High.
+
+No prediction was made about `mrd` or `mdeltree`, or about the FSInfo
+sector.
+
+### Input
+
+One 64 MiB image, built by the procedure below and then copied before each
+deletion, so that every deletion is measured against the same baseline.
+
+```text
+dd if=/dev/zero of=a.img bs=512 count=131072 status=none
+mkfs.vfat --invariant --mbr=n -F 32 -n TAPHFIX a.img
+mcopy -i a.img low.txt ::/LOWFILE.TXT
+mcopy -i a.img long.txt "::/a long deleted name.txt"
+mmd   -i a.img ::/SUBDIR
+mcopy -i a.img low.txt ::/SUBDIR/INNER.TXT
+mcopy -i a.img bigfill.bin ::/BIGFILL.BIN
+mcopy -i a.img high.txt ::/HIGHFILE.TXT
+```
+
+No partition table. The image is a bare FAT32 volume, because the question
+concerns entry and FAT bytes and a partition table would only displace every
+offset by a constant.
+
+Five deletion targets, each chosen for a property:
+
+```text
+LOWFILE.TXT               pure 8.3 name, one entry, low cluster
+a long deleted name.txt   two long-name entries preceding a short entry
+SUBDIR                    a directory, removed by mrd and by mdeltree
+SUBDIR/INNER.TXT          a file inside a directory that is then removed
+HIGHFILE.TXT              first cluster above 65,535
+```
+
+`BIGFILL.BIN` is 33 MiB of zeroes and is never deleted. It exists only to
+consume clusters so that `HIGHFILE.TXT`, allocated after it, begins above
+cluster 65,535 and can test the high word of the first cluster. Measured, it
+does: `HIGHFILE.TXT` begins at cluster 67,591, with `DIR_FstClusHI` = 1 and
+`DIR_FstClusLO` = 2055.
+
+All work was done in `/tmp/exp0003`. No fixture in the repository was
+touched, and no repository file was read or written by the experiment.
+
+### Environment
+
+```text
+Host       Ubuntu 24.04 (noble) under WSL2 on Windows
+mtools     4.0.43-1build1
+mkfs.fat   4.2 (2021-01-31)
+Exports    SOURCE_DATE_EPOCH=1577836800  TZ=UTC  MTOOLS_SKIP_CHECK=1
+```
+
+Volume geometry, read from the BIOS parameter block rather than from the
+command line that produced it:
+
+```text
+BPS=512 SPC=1 RSV=32 FATs=2 FATSz32=1009 RootClus=2
+FAT 0 at 16384   FAT 1 at 532992   data and root at 1049600
+129,022 clusters
+```
+
+### Method
+
+Deletions were performed on copies of one baseline image, and each result
+compared against the baseline byte by byte. Every differing byte was located
+to a named structure and decoded, rather than counted.
+
+`cmp` alone is insufficient for the determinism question, for the reason
+EXP-0002 records: two runs inside one clock tick compare equal without being
+deterministic. Determinism was therefore tested by deleting from the same
+baseline twice, four seconds apart, and the decoded result inspected
+separately.
+
+```text
+1. dump the baseline root directory, decoding every entry
+2. cp a.img del.img; mdel three files
+3. sleep 4; cp a.img del2.img; mdel the same three files
+4. cmp del.img del2.img
+5. diff a.img against del.img, locating every changed byte
+6. cp a.img rd.img; mdel INNER.TXT; mrd SUBDIR; diff against a.img
+7. cp a.img dt.img; mdeltree SUBDIR;          diff against a.img
+```
+
+### Expected result
+
+Comparison at step 4 identical. Step 5 to show `0xE5` in the first byte of
+five root entries, zeroed FAT entries for the three deleted files, and
+nothing else.
+
+### Actual result
+
+**1. `mdel` is deterministic.** Two deletions from the same baseline four
+seconds apart produced byte-identical images.
+
+```text
+cmp del.img del2.img
+  (no output)
+```
+
+**2. `mdel` changed exactly 30 bytes in a 64 MiB image.**
+
+The root directory, before and after:
+
+```text
+before                                                    after
+1  4c4f5746494c4520545854  clus 3      size 17            byte 0 -> 0xE5
+2  LFN ord 0x42 LAST  cksum 0x32                          byte 0 -> 0xE5
+3  LFN ord 0x01       cksum 0x32                          byte 0 -> 0xE5
+4  414c4f4e47447e31545854  clus 4      size 24            byte 0 -> 0xE5
+7  4849474846494c45545854  clus 67591  size 20            byte 0 -> 0xE5
+                           hi 1  lo 2055
+```
+
+Of the 30 bytes: five are the first byte of a directory entry, twenty-four
+are three FAT entries in **each of the two FATs**, and one is in the FSInfo
+sector.
+
+**Destroyed.** The first byte of every entry in the set, short and long
+alike. For a long-name entry that byte is `LDIR_Ord`, so the ordinal and the
+last-entry flag are destroyed for every component. The cluster chain of each
+deleted file, zeroed in FAT 0 and in FAT 1 identically.
+
+**Not destroyed.** `DIR_FstClusHI` and `DIR_FstClusLO`. `HIGHFILE.TXT`
+retained `hi = 1, lo = 2055` after deletion, so its first cluster of 67,591
+is still readable in full. Name bytes 1 to 10, `DIR_Attr`, `DIR_NTRes`, all
+timestamps, `DIR_FileSize`, and the long-name checksum byte, which read
+`0x32` before and after on both long-name entries.
+
+**No data cluster was touched.** Not one of the 30 differing bytes lies in
+the data region outside the root directory. File content survives deletion
+in full.
+
+**3. The first byte of a short name is recoverable, uniquely.**
+
+The long-name checksum is computed over the eleven-byte short name. Ten
+bytes survive. The map from the first byte to the checksum is a composition
+of bijections — each round is a rotation followed by an addition modulo 256,
+both bijective, and the first byte enters as the initial value — so exactly
+one of the 256 candidates reproduces any given checksum.
+
+Measured against the deleted entry:
+
+```text
+surviving name bytes: b'LONGD~1TXT'
+target checksum:      0x32
+candidates:           ['0x41']  ->  'A'
+```
+
+One candidate, and it is the correct one. The original name was
+`ALONGD~1.TXT`.
+
+Two candidate values can never be correct, which makes the recovery
+self-checking: `0x00` is the terminator and `0xE5` is never stored
+literally, being escaped to `0x05`. A recovery producing either proves the
+long-name set does not belong to that short entry. A recovery producing
+`0x05` means the real first character is `0xE5`.
+
+**4. A deleted long-name entry reads as a valid last entry.**
+
+`0xE5` is `1110 0101`, and bit 6 is the last-entry flag. After deletion,
+`LDIR_Ord & 0x40` is therefore non-zero on **every** component of the set,
+and `LDIR_Ord & ~0x40` is `0xA5`, or 165. Both values are artefacts of
+deletion and neither is evidence of anything. The order of a multi-entry
+long name must be reconstructed from position, never read from the ordinal.
+
+**5. The first character of the long name survives in the entry adjacent to
+the short entry, not in the one flagged last.**
+
+Long-name entries are stored in reverse. The entry carrying
+`LAST_LONG_ENTRY` holds the final fragment and sits at the lowest offset;
+the ordinal-1 entry holds characters 1 to 13 and sits immediately before the
+short entry. Measured on `a long deleted name.txt`:
+
+```text
+slot 2  ord 0x42 LAST  name1 = 640020006e0061006d00   "d nam"
+slot 3  ord 0x01       name1 = 610020006c006f006e00   "a lon"
+slot 4  ALONGD~1TXT
+```
+
+Deletion overwrites byte 0 only, so `LDIR_Name1` at bytes 1 to 10 is intact
+in both. The first character of the name is in slot 3, the entry the
+specification numbers 1 and does not flag as last.
+
+**6. `mrd` and `mdeltree` are byte-identical in effect.**
+
+Both changed the same 19 bytes: the first byte of the directory's entry in
+the root, the cluster chains of the directory and of the file it contained
+in both FATs, one byte in the FSInfo sector, and the first byte of the
+contained file's entry inside the directory's own cluster.
+
+The directory's cluster is otherwise untouched. Bytes 0 to 63 of cluster 5,
+which hold the `.` and `..` entries, are unchanged. A deleted subdirectory
+is therefore identifiable from two independent places: its entry in the
+parent, and its own cluster's dot entries.
+
+**7. Deletion updates the FSInfo sector.**
+
+Not predicted. `BPB_FSInfo` names sector 1, and `FSI_Free_Count` at offset
+488 within it moved by exactly the number of clusters freed:
+
+```text
+                       FSI_Free_Count   FSI_Nxt_Free
+baseline                       61,432         67,591
+after mdel of three files      61,435         67,591
+after removing SUBDIR          61,434         67,591
+```
+
+`FSI_Nxt_Free` did not move in either case.
+
+This is a volume-level record that deletion occurred, independent of the
+directory entries, and it is not mentioned in any of the project's prior
+research. It is a count of free clusters and not a count of deletions, so it
+establishes that clusters were freed rather than how or when.
+
+### Conclusion
+
+`mdel`, `mrd` and `mdeltree` are deterministic under the exports
+`scripts/generate-fixtures.sh` already sets. Deleted-entry fixtures may
+therefore be added to the fixture set without weakening the property
+EXP-0001 established, and `MANIFEST.sha256` remains a golden result.
+
+Deletion by `mtools` destroys the first byte of each entry and the cluster
+chain, and nothing else. Every field M6 needs in order to identify a deleted
+entry survives: the attribute that distinguishes a long-name component from
+a short entry, the checksum that re-associates a set with its short entry,
+the ten name bytes that make the destroyed byte recoverable, and both words
+of the first cluster.
+
+The high word of the first cluster is **not** zeroed. This is the finding
+that constrains the fixture set. A fixture built with `mtools` cannot
+exercise the case where a deleted file above cluster 65,535 has lost its
+start location, because `mtools` does not produce that case. Reaching it
+requires poking an image under ADR-0006 §5.1, and until that fixture exists
+the case is untested.
+
+Any first character recovered by the checksum method is `RECONSTRUCTED`
+under ADR-0003 §3 and never `VERIFIED`. The arithmetic is exact, but it
+rests on two assumptions the evidence does not establish: that the
+long-name set belongs to the short entry that follows it, and that the ten
+surviving name bytes are the original ones. The uniqueness of the result
+must not be reported as certainty about the name.
+
+### Limitations
+
+1. Measured on one host with `mtools` 4.0.43-1build1 and `mkfs.fat` 4.2.
+   Whether other versions delete identically is not established. EXP-0002
+   Limitation 2 applies unchanged.
+2. **What `mtools` destroys is not what every implementation destroys.**
+   This experiment measures the tool that builds the fixtures. It does not
+   measure Windows, and it cannot: the high-word question is a question
+   about Microsoft implementations, and no `mtools` measurement can answer
+   it. What is established is what a fixture built here can and cannot
+   prove.
+3. One cluster size only, 512 bytes at one sector per cluster. A larger
+   cluster changes how many entries a directory cluster holds and therefore
+   where residue can appear, but not what deletion writes.
+4. Deletion from the root directory and from one subdirectory. Deletion
+   from a deeply nested directory was not measured.
+5. `SUBDIR` was emptied before `mrd`. Whether `mrd` refuses a non-empty
+   directory was not tested, because `mdeltree` covers that case and
+   produced an identical result.
+
+### Next action
+
+1. Close the `mdel` determinism entry in `KNOWN_ISSUES.md` and mark EXP-0002
+   Next action 4 done.
+2. Record as a known issue that no fixture can exercise a deleted file whose
+   first-cluster high word has been zeroed, and that the case is therefore
+   untested against evidence a formatting tool produced.
+3. Decide the M6 design against these measurements and record it.
+4. Build the M6 fixtures, and confirm the fixture count byte-identical
+   across runs under `DEVELOPMENT_ENVIRONMENT.md` §12.
