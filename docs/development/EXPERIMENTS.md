@@ -470,6 +470,7 @@ condition that those exports remain.
 3. Add `fat32-root-entries.img` and confirm 13 of 13 byte-identical.
    **Done.**
 4. Measure `mdel` determinism before M6 introduces deleted-entry fixtures.
+   **Done.** EXP-0003.
 
 ---
 
