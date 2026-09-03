@@ -37,6 +37,21 @@ history.
 - FAT32 boot sector detail reported by the CLI, including root cluster,
   backup boot sector location, FAT mirroring state, and volume label
 - Rejection of an active FAT index at or beyond the declared FAT count
+- FAT32 root directory enumeration by cluster chain walk (ADR-0002 M5,
+  ADR-0008)
+- Directory entry classification covering the volume label, 8.3 names,
+  long-name components, and the attribute combination the specification
+  names invalid
+- Long-name entries retained in on-disk order and counted, not decoded
+  (ADR-0007 §5)
+- Cluster chain links read from the active FAT rather than from FAT 0
+  unconditionally (ADR-0008 §4)
+- Reporting of non-zero content found after a directory terminator, which
+  a conformant volume does not contain (ADR-0008 §5)
+- Refusal of a cyclic cluster chain, a chain link outside the data region,
+  and a directory exceeding the specification's maximum size
+- Root directory contents reported by the CLI, including the cluster chain
+  and the position of every entry
 
 ### Changed
 
