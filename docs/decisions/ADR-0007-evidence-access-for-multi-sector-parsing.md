@@ -346,3 +346,120 @@ command used to obtain any environmental claim. That was done here. What
 was not done was re-running those commands after the tree changed. A
 measurement is valid at an instant, and an ADR written later must
 re-measure rather than quote.
+
+## Appendix B: Corrections to §4 and §4.2 (2026-09-03)
+
+Three factual errors, found while auditing this document at `7e00155` before
+implementing M5. The body above is left unmodified.
+
+The decisions taken in §2 are unaffected. Two of these corrections strengthen
+the reasoning that produced them; the third replaces a justification without
+changing what it justified.
+
+The six implementation decisions arising from the same audit are recorded in
+`ADR-0008`, not here, because an appendix corrects a fact and a new ADR makes
+or amends a decision.
+
+### B.1 Correction to §4: the entry limit is in the format specification
+
+§4 states that the 65,536-entry limit appears in Microsoft's support
+documentation but not in the on-disk format specification, and treats that as
+a weakness in its own reasoning.
+
+**That is wrong.** The FAT32 File System Specification version 1.03, dated
+6 December 2000 — the document ADR-0002 §3.1 relies on for the entire
+filesystem choice — states the limit directly in its closing notes on FAT
+directories. A driver must not allow a directory to exceed 65,536 × 32 bytes,
+which is 2,097,152. The document gives two reasons: FAT directories are
+neither sorted nor indexed, so creating an entry requires checking every
+allocated entry for a duplicate name and becomes very slow on large
+directories; and many drivers and utilities, Microsoft's included, count
+directory entries in a 16-bit word.
+
+The specification also states explicitly that the limit constrains the size
+of the directory rather than the number of files it contains, which is the
+same distinction §4 draws when it converts entries to bytes.
+
+The error was caused by relying on secondary accounts of the specification
+rather than reading it. §4 was written from a Microsoft support article and a
+corroborating third-party account, both of which report the limit accurately
+but neither of which is the format specification. The primary document was
+fetched and read in full on 2026-09-03.
+
+The correction runs in the direction of greater authority, not less. The
+bound §2B adopts is not a compatibility convention inherited from a support
+page; it is stated in the same document that defines the on-disk structures
+this project parses.
+
+**Independent corroboration, not available when §4 was written.** The Linux
+FAT driver carries a constant `FAT_MAX_DIR_SIZE` of 2,097,152 bytes, exactly
+65,536 × 32. A 2020 patch to that driver proposed a sanity check in
+`fat_calc_dir_size()` returning `EIO` when a corrupted directory's computed
+size exceeds it, on the grounds that traversal would otherwise take a very
+long time.
+
+That is §4.1's decision — error rather than truncated result — reached
+independently by a mature implementation. §4.1 arrived at it from
+`PROJECT.md` §5 without knowing anyone else had.
+
+### B.2 Correction to §4.2: the visited set is bounded in clusters
+
+§4.2 states that the set of visited clusters is bounded by the same entry
+limit.
+
+Entries and clusters are not the same unit. Entries per cluster is the
+cluster size divided by 32: sixteen at one sector per cluster, 1,024 at the
+32 KiB maximum the specification permits. The 65,536-entry bound therefore
+corresponds to between 64 and 4,096 clusters depending on geometry.
+
+The visited set is bounded by `ceil(65536 / entries_per_cluster)`, at most
+4,096 `u32` values, which is 16 KiB in the worst case.
+
+That is a better bound than §4.2 implies, and stating it in the right unit
+matters because the implementation allocates the set and the test asserts
+against its limit. A set sized in entries would be up to 1,024 times larger
+than necessary.
+
+### B.3 Correction to §4.2: cycle detection is a truthfulness control
+
+§4.2 justifies cycle detection as a control on a cluster chain that may loop,
+whether through corruption or deliberate construction, and states that
+enumeration terminates on revisiting a cluster.
+
+The justification is wrong even though the measure is right.
+
+The 65,536-entry bound in §2B already guarantees termination on its own. A
+looping chain produces entries until the bound is reached, and enumeration
+then fails under §4.1. Cycle detection does not prevent non-termination,
+because non-termination is not reachable.
+
+What cycle detection provides is a truthful diagnosis. Without it, a looping
+chain and an oversized directory produce the same error, and the reader
+cannot tell a corrupt volume from a large one. With it, the two are
+distinguishable and each is reported as what it is.
+
+That places the measure under `PROJECT.md` §5, which requires that Taphonomy
+not present a guess as a verified result, rather than under `SECURITY.md`
+§16, which the entry bound satisfies unaided.
+
+The distinction is not academic. A control justified as preventing an
+infinite loop is tested by constructing a loop and asserting that enumeration
+returns. A control justified as producing a truthful diagnosis is tested by
+constructing a loop and asserting *which* error is returned. The second test
+is the one that would catch a regression here.
+
+### B.4 Cause
+
+§B.1 was caused by writing from secondary accounts of a specification the
+project already depends on, rather than from the specification. §B.2 and
+§B.3 were caused by reasoning about a bound and a control without working
+through the units or the failure mode they were claimed to prevent.
+
+ADR-0002 Appendix A §A.5 requires that an ADR state the command used to
+obtain any factual claim about the environment. Appendix A of this document
+adds that a measurement is valid only at the instant it was taken. Neither
+covers a claim about what an external document says.
+
+The requirement that does cover it — read the source, quote it, and do not
+paraphrase from recollection — was not followed. Every claim in `ADR-0008`
+§8.2 was read from the specification directly for that reason.
