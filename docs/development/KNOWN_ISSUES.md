@@ -43,8 +43,25 @@ records this as required before long-name decoding is implemented. It
 does not affect enumeration, which counts long-name entries without
 interpreting them.
 
-## mdel determinism unmeasured
+## No fixture can exercise a zeroed first-cluster high word
 
-`EXPERIMENTS.md` EXP-0002 measured `mcopy` and, transitively, `mmd`.
-Deleting a file with `mdel`, which M6 requires for deleted-entry
-fixtures, has not been measured. It must be before M6 introduces them.
+Deleting a file leaves the directory entry's `DIR_FstClusHI` intact under
+`mtools`. Measured 2026-09-04, EXP-0003:
+
+```text
+HIGHFILE.TXT before deletion   hi=1 lo=2055  cluster 67591
+HIGHFILE.TXT after mdel        hi=1 lo=2055  cluster 67591
+```
+
+Microsoft implementations are widely reported to zero that word, so a
+deleted file beginning above cluster 65,535 loses its start location
+entirely on evidence from a Windows host. The FAT32 specification does
+not require the behaviour either way.
+
+No fixture can produce the case, because the tool that builds the
+fixtures does not produce it. Reaching it requires poking an image under
+ADR-0006 section 5.1. Until that fixture exists, any code that handles a
+zeroed high word is untested against evidence a formatting tool wrote.
+
+`mdel`, `mrd` and `mdeltree` determinism is measured and is no longer an
+open issue; EXP-0003 records it.
