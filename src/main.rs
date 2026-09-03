@@ -8,7 +8,8 @@
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
-use taphonomy::fat32::parse_boot_sector;
+use taphonomy::fat_directory::{EntryKind, enumerate_root};
+use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
 };
@@ -187,9 +188,102 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition) {
                     println!("      {o}");
                 }
             }
+
+            report_root_directory(evidence, &boot, extent);
         }
         Err(e) => {
             println!("    BOOT SECTOR REJECTED: {e}");
         }
     }
+}
+
+/// Reports the root directory of a FAT32 volume.
+///
+/// An enumeration failure is reported and does not stop the other
+/// partitions, nor change the process exit code, for the same reason a read
+/// failure does not: hashing already succeeded and that result stands on
+/// its own.
+///
+/// Every entry is listed. A directory may hold 65,536 of them, so this can
+/// be long, but truncating it would present a partial listing as a complete
+/// one, which `docs/PROJECT.md` section 5 forbids.
+fn report_root_directory(
+    evidence: &mut EvidenceFile,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+) {
+    let root = match enumerate_root(evidence, boot, extent) {
+        Ok(root) => root,
+        Err(e) => {
+            println!("    ROOT DIRECTORY NOT ENUMERATED: {e}");
+            return;
+        }
+    };
+
+    let chain: Vec<String> = root.clusters.iter().map(|c| c.to_string()).collect();
+
+    println!("    root directory");
+    println!("      cluster chain      {}", chain.join(" -> "));
+    println!("      entries            {}", root.entries.len());
+    println!("      short entries      {}", root.short_entry_count());
+    println!("      long name entries  {}", root.long_name_count());
+
+    for entry in &root.entries {
+        let position = format!("c{} s{}", entry.cluster, entry.slot);
+
+        let (label, detail) = match &entry.kind {
+            EntryKind::VolumeLabel { name, .. } => {
+                ("volume label", rendered(name.as_deref()).to_string())
+            }
+            EntryKind::ShortName {
+                name,
+                directory,
+                first_cluster,
+                file_size,
+                ..
+            } => {
+                let name = rendered(name.as_deref());
+                if *directory {
+                    ("directory", format!("{name:<13} cluster {first_cluster}"))
+                } else {
+                    (
+                        "file",
+                        format!("{name:<13} {file_size} bytes, cluster {first_cluster}"),
+                    )
+                }
+            }
+            EntryKind::LongName { ordinal, last, .. } => {
+                let detail = if *last {
+                    format!("ordinal {ordinal}, last")
+                } else {
+                    format!("ordinal {ordinal}")
+                };
+                ("long name", detail)
+            }
+            EntryKind::Deleted => ("deleted", String::new()),
+            EntryKind::Invalid { attr } => ("invalid", format!("attribute {attr:#04x}")),
+            // The listing ends at the terminator and does not include it, so
+            // this arm is unreachable. It is written out rather than caught
+            // by a wildcard so that a new entry kind fails to compile here.
+            EntryKind::Terminator => ("terminator", String::new()),
+        };
+
+        println!("      {position:<9} {label:<13} {detail}");
+    }
+
+    if !root.observations.is_empty() {
+        println!("      directory observations");
+        for o in &root.observations {
+            println!("        {o}");
+        }
+    }
+}
+
+/// A name the parser could render, or a marker that it could not.
+///
+/// A name field is eleven bytes of untrusted evidence. When the parser
+/// refuses it, the bytes appear in an observation as hexadecimal rather than
+/// reaching the terminal as characters.
+fn rendered(name: Option<&str>) -> &str {
+    name.unwrap_or("<not printable ascii>")
 }
