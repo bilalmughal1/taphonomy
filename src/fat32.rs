@@ -19,7 +19,7 @@
 
 use std::fmt;
 
-use crate::fat::{FatGeometry, OFF_FAT_SIZE_16};
+use crate::fat::{FIRST_DATA_CLUSTER, FatGeometry, OFF_FAT_SIZE_16};
 use crate::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, identify, le_u16, le_u32, printable_ascii,
 };
@@ -45,11 +45,8 @@ const EXT_FLAGS_MIRRORING_DISABLED: u16 = 0x0080;
 /// Bits 0-3 of `BPB_ExtFlags`, the zero-based index of the active FAT.
 const EXT_FLAGS_ACTIVE_FAT: u16 = 0x000F;
 
-/// Cluster numbers 0 and 1 are reserved. The first addressable cluster is 2.
-const FIRST_DATA_CLUSTER: u32 = 2;
-
 /// Bytes in one FAT32 file allocation table entry.
-const FAT32_ENTRY_BYTES: u64 = 4;
+pub(crate) const FAT32_ENTRY_BYTES: u64 = 4;
 
 /// A reason a volume boot record is not a usable FAT32 boot sector.
 #[derive(Clone, PartialEq, Eq, Debug)]

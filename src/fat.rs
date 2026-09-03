@@ -40,6 +40,13 @@ const FAT16_MAX_CLUSTERS: u32 = 65525;
 /// Maximum cluster size in bytes permitted by the FAT specification.
 const MAX_CLUSTER_BYTES: u32 = 32_768;
 
+/// Cluster numbers 0 and 1 are reserved. The first addressable cluster is 2.
+///
+/// True of FAT12, FAT16 and FAT32 alike. The specification states it in its
+/// general description of the FAT data structure, not in a variant-specific
+/// section, which is why it lives here rather than in `fat32.rs`.
+pub(crate) const FIRST_DATA_CLUSTER: u32 = 2;
+
 /// Geometry read from a FAT BIOS parameter block.
 ///
 /// Every field is as declared in the volume. Values are validated against the

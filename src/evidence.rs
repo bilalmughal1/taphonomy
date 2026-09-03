@@ -103,3 +103,33 @@ impl EvidenceFile {
             .map_err(|e| Error::from_io(&self.path, e))
     }
 }
+
+/// Positional read access to evidence.
+///
+/// One method, because that is all a parser needs: an offset and a buffer,
+/// filled or failed. There is no cursor to leave in the wrong place between
+/// calls, and no method that writes.
+///
+/// The receiver is `&mut self` because the implementation below seeks before
+/// reading. That is invisible across this boundary — a caller cannot observe
+/// a cursor, move one, or leave one anywhere — but it does mean one reader
+/// cannot be shared between two callers. ADR-0008 section 3 records why the
+/// `pread` alternative was rejected, and section 10 the condition under
+/// which it should be revisited.
+///
+/// Implementors must fail rather than pad when the evidence ends before the
+/// buffer is full. A short read reported as a complete one produces zeroed
+/// structures that parse.
+pub trait EvidenceReader {
+    /// Reads exactly `buf.len()` bytes starting at `offset`.
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error>;
+}
+
+impl EvidenceReader for EvidenceFile {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        // Fully qualified deliberately. An unqualified call resolves to this
+        // trait method rather than the inherent one and recurses until the
+        // stack is exhausted.
+        EvidenceFile::read_exact_at(self, offset, buf)
+    }
+}

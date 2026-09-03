@@ -1,0 +1,1265 @@
+//! FAT directory entries and FAT32 root directory enumeration.
+//!
+//! # What is shared and what is not
+//!
+//! The 32-byte directory entry structure parsed by [`classify`] is identical
+//! on FAT12, FAT16 and FAT32. That part of this module would serve all three.
+//!
+//! [`enumerate_root`] is FAT32-only. On FAT12 and FAT16 the root directory is
+//! a fixed-size region located immediately after the last FAT and sized by
+//! `BPB_RootEntCnt`; there is no cluster chain to walk. FAT32 sets that field
+//! to zero and stores the root directory as an ordinary cluster chain.
+//!
+//! The module is named for FAT rather than for directories generally because
+//! chain walking is not shared beyond it.
+//!
+//! # What this does not do
+//!
+//! Long-filename entries are located, counted and kept in on-disk order.
+//! They are not decoded. ADR-0007 section 5 records why, and section 5.3
+//! records why the decision matters more for M6 than for M5.
+//!
+//! Short names are rendered only when every byte is printable ASCII. FAT
+//! stores them in the OEM code page current when the entry was created, and
+//! no code page information is recorded on the volume. Guessing one would
+//! produce a name that looks authoritative and may be wrong.
+//!
+//! `DIR_NTRes` is recorded and not acted on. The specification instructs
+//! readers to set it to zero on creation and never look at it afterwards,
+//! while the tools that produced this project's fixtures write case flags
+//! into it. Applying those flags would be an interpretation; recording the
+//! byte preserves the evidence for a milestone that decides to.
+
+use std::fmt;
+
+use crate::error::Error;
+use crate::evidence::EvidenceReader;
+use crate::fat::FIRST_DATA_CLUSTER;
+use crate::fat32::{FAT32_ENTRY_BYTES, Fat32BootSector};
+use crate::filesystem::{VolumeExtent, le_u16, le_u32};
+
+/// Bytes in one directory entry.
+pub const ENTRY_BYTES: usize = 32;
+
+/// Bytes in the 8.3 name field.
+pub const NAME_LEN: usize = 11;
+
+/// Bytes in the name field's stem. The remainder is the extension.
+const NAME_STEM_LEN: usize = 8;
+
+/// Offset of `DIR_Name`. `LDIR_Ord` occupies the same byte in a long-name
+/// entry, which is why the first byte can classify an entry before its
+/// attribute is read.
+const OFF_NAME: usize = 0x00;
+const OFF_ATTR: usize = 0x0B;
+const OFF_NT_RES: usize = 0x0C;
+const OFF_LDIR_CHKSUM: usize = 0x0D;
+const OFF_FST_CLUS_HI: usize = 0x14;
+const OFF_FST_CLUS_LO: usize = 0x1A;
+const OFF_FILE_SIZE: usize = 0x1C;
+
+const ATTR_READ_ONLY: u8 = 0x01;
+const ATTR_HIDDEN: u8 = 0x02;
+const ATTR_SYSTEM: u8 = 0x04;
+const ATTR_VOLUME_ID: u8 = 0x08;
+const ATTR_DIRECTORY: u8 = 0x10;
+const ATTR_ARCHIVE: u8 = 0x20;
+
+/// The attribute combination marking a long-name entry.
+///
+/// This contains [`ATTR_VOLUME_ID`], so a bitmask test for the volume label
+/// matches every long-name entry. The specification requires equality
+/// against [`ATTR_LONG_NAME_MASK`], not a bit test.
+const ATTR_LONG_NAME: u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
+
+/// The mask applied before comparing against [`ATTR_LONG_NAME`].
+const ATTR_LONG_NAME_MASK: u8 = ATTR_LONG_NAME | ATTR_DIRECTORY | ATTR_ARCHIVE;
+
+/// First byte marking an entry free with allocated entries possibly
+/// following.
+const NAME_DELETED: u8 = 0xE5;
+
+/// First byte marking an entry free with no allocated entries following.
+const NAME_TERMINATOR: u8 = 0x00;
+
+/// First byte standing in for a literal `0xE5`.
+///
+/// `0xE5` is a valid lead byte in the Japanese character set, so a name
+/// legitimately beginning with it is stored as `0x05` to keep the entry from
+/// reading as deleted.
+const NAME_ESCAPED_E5: u8 = 0x05;
+
+/// Bit marking the last entry of a long-name set.
+const LDIR_ORD_LAST: u8 = 0x40;
+
+/// Mask applied to a FAT32 table entry. The high four bits are reserved.
+const FAT_ENTRY_MASK: u32 = 0x0FFF_FFFF;
+
+/// Lowest value marking the end of a cluster chain.
+///
+/// This is a range, not a single value. Formatting tools write `0x0FFFFFFF`
+/// for files and `0x0FFFFFF8` for the root directory, and both appear in the
+/// project's own fixtures.
+const FAT_END_OF_CHAIN: u32 = 0x0FFF_FFF8;
+
+/// Value marking a cluster as unusable.
+const FAT_BAD_CLUSTER: u32 = 0x0FFF_FFF7;
+
+/// Maximum directory entries.
+///
+/// The FAT32 specification requires that a directory not exceed
+/// 65,536 * 32 bytes. ADR-0007 section 4 adopts it as a hard bound and
+/// section 4.1 requires that exceeding it be an error rather than a
+/// truncated result.
+pub const MAX_ENTRIES: usize = 65_536;
+
+/// What a 32-byte directory entry contains.
+///
+/// Classification is total: every possible 32 bytes is one of these. There
+/// is no error case, so [`classify`] cannot fail.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum EntryKind {
+    /// Free, and the specification states no allocated entries follow.
+    Terminator,
+
+    /// Free, and previously used.
+    ///
+    /// Carries no payload in M5, which does not attempt recovery. M6 will
+    /// need the remaining bytes.
+    Deleted,
+
+    /// One component of a long-name set.
+    ///
+    /// Retained in on-disk order and counted, not decoded. The set precedes
+    /// the short entry it names.
+    LongName {
+        /// Position within the set, counting from one.
+        ordinal: u8,
+        /// Whether this is the last component, which appears first on disk.
+        last: bool,
+        /// Checksum of the associated short name.
+        checksum: u8,
+    },
+
+    /// The volume label.
+    ///
+    /// Valid only in the root directory, and the only entry for which the
+    /// volume-id attribute stands alone.
+    VolumeLabel {
+        /// Rendered name, if every byte is printable ASCII.
+        name: Option<String>,
+        /// The name field as stored.
+        raw_name: [u8; NAME_LEN],
+    },
+
+    /// A file or subdirectory.
+    ShortName {
+        /// Rendered `STEM.EXT`, if every byte is printable ASCII.
+        name: Option<String>,
+        /// The name field as stored, before rendering.
+        raw_name: [u8; NAME_LEN],
+        /// Whether the directory attribute is set.
+        directory: bool,
+        /// First cluster, assembled from the high and low words.
+        first_cluster: u32,
+        /// Size in bytes. Always zero for a directory.
+        file_size: u32,
+        /// `DIR_NTRes`, recorded and not interpreted.
+        nt_res: u8,
+    },
+
+    /// Both the directory and volume-id attribute bits are set.
+    ///
+    /// The specification's own classification names this combination
+    /// invalid rather than assigning it a meaning.
+    Invalid {
+        /// The attribute byte as stored.
+        attr: u8,
+    },
+}
+
+/// One directory entry and where it was found.
+///
+/// The cluster is retained so that a later milestone can name an entry's
+/// location without walking the chain again.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Entry {
+    /// Cluster the entry was read from.
+    pub cluster: u32,
+    /// Position within that cluster, counting from zero.
+    pub slot: usize,
+    /// What the entry contains.
+    pub kind: EntryKind,
+}
+
+/// Something worth reporting that does not prevent enumeration.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DirectoryObservation {
+    /// A cluster holds non-zero bytes after the terminator.
+    ///
+    /// The specification states that no allocated entries follow a `0x00`
+    /// first byte, so a conformant volume has nothing here. Formatters
+    /// exist that write the terminator without clearing what follows, and
+    /// on real evidence that residue is a record of what the directory
+    /// previously held.
+    ContentAfterTerminator {
+        cluster: u32,
+        /// First slot after the terminator holding a non-zero byte.
+        first_slot: usize,
+        /// How many slots in this cluster hold non-zero bytes.
+        slots: usize,
+    },
+
+    /// A name field contains bytes outside printable ASCII.
+    ///
+    /// Expected on volumes written with a non-ASCII OEM code page. The
+    /// bytes are reported in hexadecimal rather than rendered, because a
+    /// name field is untrusted evidence and rendering it would put
+    /// arbitrary bytes on the reader's terminal.
+    NameNotPrintableAscii {
+        cluster: u32,
+        slot: usize,
+        raw_name: [u8; NAME_LEN],
+    },
+
+    /// An entry sets both the directory and volume-id attribute bits.
+    InvalidAttribute { cluster: u32, slot: usize, attr: u8 },
+}
+
+impl fmt::Display for DirectoryObservation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DirectoryObservation::ContentAfterTerminator {
+                cluster,
+                first_slot,
+                slots,
+            } => write!(
+                f,
+                "cluster {cluster} holds content after the terminator: \
+                 {slots} slots from slot {first_slot}"
+            ),
+            DirectoryObservation::NameNotPrintableAscii {
+                cluster,
+                slot,
+                raw_name,
+            } => {
+                write!(
+                    f,
+                    "cluster {cluster} slot {slot} name is not printable ASCII: "
+                )?;
+                for byte in raw_name {
+                    write!(f, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+            DirectoryObservation::InvalidAttribute {
+                cluster,
+                slot,
+                attr,
+            } => write!(
+                f,
+                "cluster {cluster} slot {slot} sets both the directory and \
+                 volume label attributes: {attr:#04x}"
+            ),
+        }
+    }
+}
+
+/// A reason enumeration could not complete.
+///
+/// This type is deliberately not `PartialEq`: [`DirectoryError::Evidence`]
+/// wraps an [`Error`], which holds an [`std::io::Error`]. Tests match on it
+/// with `matches!` rather than comparing by value, as the unit tests in
+/// `fat32.rs` already do.
+#[derive(Debug)]
+pub enum DirectoryError {
+    /// The directory exceeds the specification's maximum.
+    TooLarge { entries: usize },
+
+    /// The chain returns to a cluster it has already visited.
+    ///
+    /// Enumeration would terminate without this check, because the entry
+    /// bound is reached first. Detecting the cycle distinguishes a corrupt
+    /// chain from a directory that is merely too large.
+    CyclicChain { cluster: u32 },
+
+    /// A chain link names a cluster outside the data region.
+    ClusterOutOfRange { cluster: u32, cluster_count: u32 },
+
+    /// A chain link names a cluster marked unusable.
+    BadCluster { cluster: u32 },
+
+    /// A chain link names cluster 0 or 1, which are reserved.
+    ReservedChainLink { from: u32, next: u32 },
+
+    /// An offset could not be computed without overflow.
+    OffsetOverflow { cluster: u32 },
+
+    /// Reading evidence failed.
+    Evidence(Error),
+}
+
+impl fmt::Display for DirectoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DirectoryError::TooLarge { entries } => write!(
+                f,
+                "directory exceeds {MAX_ENTRIES} entries, stopped at {entries}"
+            ),
+            DirectoryError::CyclicChain { cluster } => {
+                write!(f, "cluster chain returns to cluster {cluster}")
+            }
+            DirectoryError::ClusterOutOfRange {
+                cluster,
+                cluster_count,
+            } => write!(
+                f,
+                "cluster {cluster} is outside the {cluster_count} data clusters"
+            ),
+            DirectoryError::BadCluster { cluster } => {
+                write!(f, "cluster {cluster} is marked unusable")
+            }
+            DirectoryError::ReservedChainLink { from, next } => {
+                write!(f, "cluster {from} chains to reserved cluster {next}")
+            }
+            DirectoryError::OffsetOverflow { cluster } => {
+                write!(f, "offset for cluster {cluster} overflows")
+            }
+            DirectoryError::Evidence(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for DirectoryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DirectoryError::Evidence(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<Error> for DirectoryError {
+    fn from(e: Error) -> Self {
+        DirectoryError::Evidence(e)
+    }
+}
+
+/// An enumerated root directory.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RootDirectory {
+    /// Entries in on-disk order, ending at the terminator.
+    ///
+    /// The terminator itself is not included. Long-name entries are, in the
+    /// position they occupy relative to the short entry that follows them.
+    pub entries: Vec<Entry>,
+
+    /// Clusters walked, in chain order.
+    pub clusters: Vec<u32>,
+
+    /// Findings that did not prevent enumeration.
+    pub observations: Vec<DirectoryObservation>,
+}
+
+impl RootDirectory {
+    /// Entries that are neither long-name components nor the volume label.
+    pub fn file_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::ShortName { .. }))
+            .count()
+    }
+
+    /// Long-name components retained but not decoded.
+    pub fn long_name_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::LongName { .. }))
+            .count()
+    }
+}
+
+/// Classifies one directory entry.
+///
+/// Performs no I/O and cannot fail. The parameter is a fixed-size array
+/// rather than a slice so that the bounds obligation of
+/// [`crate::filesystem::le_u16`] and [`crate::filesystem::le_u32`], which
+/// index without checking, is discharged by the compiler.
+///
+/// The first byte is examined before the attribute, because a deleted
+/// long-name entry is deleted rather than a long name. The specification's
+/// test for a long name requires both the masked attribute to match and the
+/// first byte not to be the deleted marker.
+pub fn classify(entry: &[u8; ENTRY_BYTES]) -> EntryKind {
+    let first = entry[OFF_NAME];
+
+    if first == NAME_TERMINATOR {
+        return EntryKind::Terminator;
+    }
+    if first == NAME_DELETED {
+        return EntryKind::Deleted;
+    }
+
+    let attr = entry[OFF_ATTR];
+
+    if attr & ATTR_LONG_NAME_MASK == ATTR_LONG_NAME {
+        return EntryKind::LongName {
+            ordinal: first & !LDIR_ORD_LAST,
+            last: first & LDIR_ORD_LAST != 0,
+            checksum: entry[OFF_LDIR_CHKSUM],
+        };
+    }
+
+    let mut raw_name = [0u8; NAME_LEN];
+    raw_name.copy_from_slice(&entry[OFF_NAME..OFF_NAME + NAME_LEN]);
+
+    match attr & (ATTR_DIRECTORY | ATTR_VOLUME_ID) {
+        ATTR_VOLUME_ID => EntryKind::VolumeLabel {
+            name: short_name(&raw_name),
+            raw_name,
+        },
+        combined if combined == ATTR_DIRECTORY | ATTR_VOLUME_ID => EntryKind::Invalid { attr },
+        _ => {
+            let high = le_u16(entry, OFF_FST_CLUS_HI) as u32;
+            let low = le_u16(entry, OFF_FST_CLUS_LO) as u32;
+
+            EntryKind::ShortName {
+                name: short_name(&raw_name),
+                raw_name,
+                directory: attr & ATTR_DIRECTORY != 0,
+                first_cluster: (high << 16) | low,
+                file_size: le_u32(entry, OFF_FILE_SIZE),
+                nt_res: entry[OFF_NT_RES],
+            }
+        }
+    }
+}
+
+/// Renders an 8.3 name as `STEM.EXT`.
+///
+/// Returns `None` unless every byte is printable ASCII. Names are stored in
+/// the OEM code page current when the entry was created, which the volume
+/// does not record, so bytes above `0x7E` cannot be rendered without
+/// guessing. A name whose first byte is the escaped form of `0xE5` also
+/// returns `None`, because the character it stands for is not ASCII.
+///
+/// The stem and extension are space-padded separately and are therefore
+/// trimmed separately. Trimming the field as a whole would produce
+/// `HELLO   TXT` rather than `HELLO.TXT`.
+fn short_name(raw: &[u8; NAME_LEN]) -> Option<String> {
+    let mut bytes = *raw;
+    if bytes[0] == NAME_ESCAPED_E5 {
+        bytes[0] = NAME_DELETED;
+    }
+
+    if !bytes.iter().all(|b| (0x20..=0x7E).contains(b)) {
+        return None;
+    }
+
+    let stem = trim_trailing_spaces(&bytes[..NAME_STEM_LEN]);
+    let ext = trim_trailing_spaces(&bytes[NAME_STEM_LEN..]);
+
+    if stem.is_empty() {
+        return None;
+    }
+
+    let mut name = String::with_capacity(NAME_LEN + 1);
+    name.push_str(stem);
+    if !ext.is_empty() {
+        name.push('.');
+        name.push_str(ext);
+    }
+    Some(name)
+}
+
+/// Trims trailing `0x20` bytes. The caller has established the slice is
+/// printable ASCII, so it is valid UTF-8.
+fn trim_trailing_spaces(bytes: &[u8]) -> &str {
+    let end = bytes
+        .iter()
+        .rposition(|b| *b != b' ')
+        .map_or(0, |last| last + 1);
+    std::str::from_utf8(&bytes[..end]).unwrap_or("")
+}
+
+/// Byte offset of a cluster's first sector, relative to the evidence.
+fn cluster_offset(
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    cluster: u32,
+) -> Result<u64, DirectoryError> {
+    let overflow = || DirectoryError::OffsetOverflow { cluster };
+
+    (cluster as u64)
+        .checked_sub(FIRST_DATA_CLUSTER as u64)
+        .and_then(|n| n.checked_mul(boot.geometry.sectors_per_cluster as u64))
+        .and_then(|n| n.checked_add(boot.first_data_sector_absolute(extent)))
+        .and_then(|n| n.checked_mul(boot.geometry.bytes_per_sector as u64))
+        .ok_or_else(overflow)
+}
+
+/// Byte offset of a cluster's entry in the given FAT, relative to the
+/// evidence.
+///
+/// The FAT is large enough to hold an entry for every declared cluster:
+/// `parse_boot_sector` refuses a volume where it is not, so this offset
+/// cannot fall outside the FAT region for a cluster the caller has already
+/// range-checked.
+fn fat_entry_offset(
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    fat_index: u8,
+    cluster: u32,
+) -> Result<u64, DirectoryError> {
+    let overflow = || DirectoryError::OffsetOverflow { cluster };
+
+    let fat_start = (fat_index as u64)
+        .checked_mul(boot.geometry.fat_size as u64)
+        .and_then(|n| n.checked_add(boot.geometry.reserved_sectors as u64))
+        .and_then(|n| n.checked_add(extent.start_lba as u64))
+        .and_then(|n| n.checked_mul(boot.geometry.bytes_per_sector as u64))
+        .ok_or_else(overflow)?;
+
+    (cluster as u64)
+        .checked_mul(FAT32_ENTRY_BYTES)
+        .and_then(|n| n.checked_add(fat_start))
+        .ok_or_else(overflow)
+}
+
+/// Enumerates the root directory.
+///
+/// Walks the cluster chain from `boot.root_cluster`, reading one cluster at
+/// a time. Chain links come from the active FAT: FAT 0 when mirroring is
+/// enabled, and the FAT named by `BPB_ExtFlags` when it is not. Reading
+/// FAT 0 unconditionally would return unmaintained data on a volume where
+/// mirroring is disabled.
+///
+/// Every cluster is scanned in full. The entry listing ends at the first
+/// terminator, and non-zero content beyond it is reported as an observation
+/// rather than listed or discarded.
+pub fn enumerate_root<R: EvidenceReader>(
+    reader: &mut R,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+) -> Result<RootDirectory, DirectoryError> {
+    let cluster_bytes = boot.geometry.cluster_bytes() as usize;
+    let slots_per_cluster = cluster_bytes / ENTRY_BYTES;
+
+    // The entry bound stops binding once the terminator is passed, because
+    // no further entries are listed while the chain is still being walked.
+    // Expressed in clusters it keeps binding: at sixteen slots per cluster
+    // this is 4,096, and at the 32 KiB maximum it is 64.
+    let max_clusters = MAX_ENTRIES.div_ceil(slots_per_cluster);
+    let fat_index = boot.active_fat().unwrap_or(0);
+    let last_cluster = boot.geometry.cluster_count as u64 + FIRST_DATA_CLUSTER as u64;
+
+    let mut buffer = vec![0u8; cluster_bytes];
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut clusters: Vec<u32> = Vec::new();
+    let mut observations: Vec<DirectoryObservation> = Vec::new();
+
+    let mut cluster = boot.root_cluster;
+    let mut terminated = false;
+
+    loop {
+        if (cluster as u64) < FIRST_DATA_CLUSTER as u64 || cluster as u64 >= last_cluster {
+            return Err(DirectoryError::ClusterOutOfRange {
+                cluster,
+                cluster_count: boot.geometry.cluster_count,
+            });
+        }
+        if clusters.contains(&cluster) {
+            return Err(DirectoryError::CyclicChain { cluster });
+        }
+        if clusters.len() >= max_clusters {
+            return Err(DirectoryError::TooLarge {
+                entries: clusters.len() * slots_per_cluster,
+            });
+        }
+        clusters.push(cluster);
+
+        let offset = cluster_offset(boot, extent, cluster)?;
+        reader.read_exact_at(offset, &mut buffer)?;
+
+        let mut residue_first: Option<usize> = None;
+        let mut residue_slots = 0usize;
+
+        // `as_chunks` yields `&[u8; ENTRY_BYTES]`, so `classify` receives the
+        // fixed-size array with no intermediate copy, and the bounds
+        // obligation of `le_u16` and `le_u32` is discharged by the type
+        // rather than by reconstructing the array here. The remainder is
+        // always empty: a cluster is a whole number of 512-byte sectors, so
+        // its length is always a multiple of 32.
+        for (slot, raw) in buffer.as_chunks::<ENTRY_BYTES>().0.iter().enumerate() {
+            if terminated {
+                if raw.iter().any(|b| *b != 0) {
+                    residue_first.get_or_insert(slot);
+                    residue_slots += 1;
+                }
+                continue;
+            }
+
+            let kind = classify(raw);
+
+            if matches!(kind, EntryKind::Terminator) {
+                terminated = true;
+                continue;
+            }
+
+            match &kind {
+                EntryKind::ShortName {
+                    name: None,
+                    raw_name,
+                    ..
+                }
+                | EntryKind::VolumeLabel {
+                    name: None,
+                    raw_name,
+                } => observations.push(DirectoryObservation::NameNotPrintableAscii {
+                    cluster,
+                    slot,
+                    raw_name: *raw_name,
+                }),
+                EntryKind::Invalid { attr } => {
+                    observations.push(DirectoryObservation::InvalidAttribute {
+                        cluster,
+                        slot,
+                        attr: *attr,
+                    });
+                }
+                _ => {}
+            }
+
+            if entries.len() >= MAX_ENTRIES {
+                return Err(DirectoryError::TooLarge {
+                    entries: entries.len(),
+                });
+            }
+
+            entries.push(Entry {
+                cluster,
+                slot,
+                kind,
+            });
+        }
+
+        if let Some(first_slot) = residue_first {
+            observations.push(DirectoryObservation::ContentAfterTerminator {
+                cluster,
+                first_slot,
+                slots: residue_slots,
+            });
+        }
+
+        let next = read_fat_entry(reader, boot, extent, fat_index, cluster)?;
+
+        if next >= FAT_END_OF_CHAIN {
+            break;
+        }
+        if next == FAT_BAD_CLUSTER {
+            return Err(DirectoryError::BadCluster { cluster: next });
+        }
+        if next < FIRST_DATA_CLUSTER {
+            return Err(DirectoryError::ReservedChainLink {
+                from: cluster,
+                next,
+            });
+        }
+
+        cluster = next;
+    }
+
+    Ok(RootDirectory {
+        entries,
+        clusters,
+        observations,
+    })
+}
+
+/// Reads one FAT entry, masked to its 28 significant bits.
+fn read_fat_entry<R: EvidenceReader>(
+    reader: &mut R,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    fat_index: u8,
+    cluster: u32,
+) -> Result<u32, DirectoryError> {
+    let offset = fat_entry_offset(boot, extent, fat_index, cluster)?;
+    let mut raw = [0u8; FAT32_ENTRY_BYTES as usize];
+    reader.read_exact_at(offset, &mut raw)?;
+    Ok(u32::from_le_bytes(raw) & FAT_ENTRY_MASK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An entry with the name field set and everything else zeroed.
+    fn entry(name: &[u8; NAME_LEN], attr: u8) -> [u8; ENTRY_BYTES] {
+        let mut e = [0u8; ENTRY_BYTES];
+        e[OFF_NAME..OFF_NAME + NAME_LEN].copy_from_slice(name);
+        e[OFF_ATTR] = attr;
+        e
+    }
+
+    #[test]
+    fn a_zero_first_byte_is_the_terminator() {
+        assert_eq!(classify(&[0u8; ENTRY_BYTES]), EntryKind::Terminator);
+    }
+
+    #[test]
+    fn a_deleted_marker_is_deleted_before_the_attribute_is_read() {
+        let mut e = entry(b"HELLO   TXT", ATTR_LONG_NAME);
+        e[OFF_NAME] = NAME_DELETED;
+
+        assert_eq!(
+            classify(&e),
+            EntryKind::Deleted,
+            "a deleted long-name entry is deleted, not a long name"
+        );
+    }
+
+    #[test]
+    fn a_long_name_entry_is_not_a_volume_label() {
+        // The ordinal and first name field of the long-name set in
+        // fat32-root-entries.img, at offset 0x1fc460: " 2019" in UTF-16LE.
+        let e = entry(
+            b"\x42\x20\x00\x32\x00\x30\x00\x31\x00\x39\x00",
+            ATTR_LONG_NAME,
+        );
+
+        match classify(&e) {
+            EntryKind::LongName { ordinal, last, .. } => {
+                assert_eq!(ordinal, 2);
+                assert!(last, "0x40 marks the last component of the set");
+            }
+            other => panic!(
+                "0x0F contains the volume-id bit; a bitmask test would \
+                 misclassify this. Got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_volume_label_is_distinguished_from_a_long_name() {
+        let e = entry(b"TAPHFIX    ", ATTR_VOLUME_ID);
+
+        match classify(&e) {
+            EntryKind::VolumeLabel { name, .. } => {
+                assert_eq!(name.as_deref(), Some("TAPHFIX"));
+            }
+            other => panic!("expected a volume label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn both_directory_and_volume_bits_set_is_invalid() {
+        let e = entry(b"CONFUSED   ", ATTR_DIRECTORY | ATTR_VOLUME_ID);
+        assert_eq!(
+            classify(&e),
+            EntryKind::Invalid {
+                attr: ATTR_DIRECTORY | ATTR_VOLUME_ID
+            }
+        );
+    }
+
+    #[test]
+    fn a_short_name_assembles_its_cluster_from_both_words() {
+        let mut e = entry(b"HELLO   TXT", ATTR_ARCHIVE);
+        e[OFF_FST_CLUS_HI..OFF_FST_CLUS_HI + 2].copy_from_slice(&0x0012u16.to_le_bytes());
+        e[OFF_FST_CLUS_LO..OFF_FST_CLUS_LO + 2].copy_from_slice(&0x3456u16.to_le_bytes());
+        e[OFF_FILE_SIZE..OFF_FILE_SIZE + 4].copy_from_slice(&24u32.to_le_bytes());
+
+        match classify(&e) {
+            EntryKind::ShortName {
+                name,
+                first_cluster,
+                file_size,
+                directory,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("HELLO.TXT"));
+                assert_eq!(first_cluster, 0x0012_3456);
+                assert_eq!(file_size, 24);
+                assert!(!directory);
+            }
+            other => panic!("expected a short name, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nt_res_is_recorded_and_not_applied() {
+        let mut e = entry(b"README  MD ", ATTR_ARCHIVE);
+        e[OFF_NT_RES] = 0x18;
+
+        match classify(&e) {
+            EntryKind::ShortName { name, nt_res, .. } => {
+                assert_eq!(nt_res, 0x18);
+                assert_eq!(
+                    name.as_deref(),
+                    Some("README.MD"),
+                    "the case flags are evidence, not an instruction to rewrite the name"
+                );
+            }
+            other => panic!("expected a short name, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stem_and_extension_are_trimmed_separately() {
+        assert_eq!(short_name(b"HELLO   TXT").as_deref(), Some("HELLO.TXT"));
+        assert_eq!(short_name(b"NOEXT      ").as_deref(), Some("NOEXT"));
+        assert_eq!(short_name(b"ANNUAL~1TXT").as_deref(), Some("ANNUAL~1.TXT"));
+    }
+
+    #[test]
+    fn a_name_outside_printable_ascii_is_not_rendered() {
+        assert_eq!(short_name(b"CAF\xe9    TXT"), None);
+    }
+
+    #[test]
+    fn an_escaped_kanji_lead_byte_is_not_a_deleted_entry() {
+        let mut e = entry(b"XABCDEFGTXT", ATTR_ARCHIVE);
+        e[OFF_NAME] = NAME_ESCAPED_E5;
+
+        assert!(
+            matches!(classify(&e), EntryKind::ShortName { name: None, .. }),
+            "0x05 stands for a literal 0xE5 and marks a live entry"
+        );
+    }
+
+    #[test]
+    fn a_directory_entry_reports_itself_as_one() {
+        let e = entry(b"LOGS       ", ATTR_DIRECTORY);
+
+        match classify(&e) {
+            EntryKind::ShortName { directory, .. } => assert!(directory),
+            other => panic!("expected a short name, got {other:?}"),
+        }
+    }
+
+    // Chain walking.
+    //
+    // The offsets below were computed by hand from the fixture geometry and
+    // then confirmed against fat32-root-multicluster.img, whose FAT begins at
+    // 0x104000 and whose cluster 2 begins at 0x1fc400. They are written out
+    // rather than obtained from `cluster_offset` and `fat_entry_offset`,
+    // because a test that addresses evidence with the same function it is
+    // testing agrees with that function whether or not either is right.
+
+    /// Volume geometry, matching `crate::fat::tests::fat32_sector`.
+    const CLUSTER_BYTES: usize = 512;
+    const START_LBA: u32 = 2048;
+    const TOTAL_SECTORS: u32 = 129_024;
+    const CLUSTER_COUNT: u32 = 127_006;
+
+    /// Byte offset of FAT 0, FAT 1, and the first data cluster.
+    const FAT0_BASE: u64 = 1_064_960;
+    const FAT1_BASE: u64 = 1_573_376;
+    const CLUSTER2_BASE: u64 = 2_081_792;
+
+    /// Bytes in the whole evidence image.
+    const IMAGE_BYTES: u64 = 67_108_864;
+
+    /// An in-memory evidence image.
+    ///
+    /// Regions are written explicitly; everything else reads as zero, which
+    /// is what a freshly formatted volume holds.
+    ///
+    /// A read that runs past `len` fails, because `EvidenceFile` fails when
+    /// the file ends before the buffer is filled. A double that padded
+    /// instead would let these tests pass against behaviour the real type
+    /// does not have.
+    struct MemoryImage {
+        len: u64,
+        regions: Vec<(u64, Vec<u8>)>,
+    }
+
+    impl MemoryImage {
+        fn new(len: u64) -> Self {
+            Self {
+                len,
+                regions: Vec::new(),
+            }
+        }
+
+        fn write(&mut self, offset: u64, bytes: &[u8]) {
+            self.regions.push((offset, bytes.to_vec()));
+        }
+
+        /// Writes one FAT entry into the FAT beginning at `fat_base`.
+        fn write_fat(&mut self, fat_base: u64, cluster: u32, value: u32) {
+            self.write(fat_base + cluster as u64 * 4, &value.to_le_bytes());
+        }
+
+        /// Writes a directory cluster, zero-filling the unused slots.
+        fn write_cluster(&mut self, cluster: u32, entries: &[[u8; ENTRY_BYTES]]) {
+            let mut bytes = vec![0u8; CLUSTER_BYTES];
+            for (slot, e) in entries.iter().enumerate() {
+                let start = slot * ENTRY_BYTES;
+                bytes[start..start + ENTRY_BYTES].copy_from_slice(e);
+            }
+            self.write(
+                CLUSTER2_BASE + (cluster as u64 - 2) * CLUSTER_BYTES as u64,
+                &bytes,
+            );
+        }
+    }
+
+    impl EvidenceReader for MemoryImage {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+            let end = offset + buf.len() as u64;
+            if end > self.len {
+                return Err(Error::from_io(
+                    std::path::Path::new("<memory>"),
+                    std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+                ));
+            }
+
+            buf.fill(0);
+            for (start, bytes) in &self.regions {
+                let region_end = start + bytes.len() as u64;
+                let lo = (*start).max(offset);
+                let hi = region_end.min(end);
+                if lo < hi {
+                    let src = (lo - start) as usize;
+                    let dst = (lo - offset) as usize;
+                    let n = (hi - lo) as usize;
+                    buf[dst..dst + n].copy_from_slice(&bytes[src..src + n]);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn extent() -> VolumeExtent {
+        VolumeExtent {
+            start_lba: START_LBA,
+            sector_count: TOTAL_SECTORS,
+        }
+    }
+
+    /// A parsed boot sector for the synthetic volume.
+    ///
+    /// `ext_flags` is written verbatim so that the mirroring-disabled path,
+    /// which no fixture can reach because `mkfs.vfat` offers no option to set
+    /// the field, can be exercised here.
+    fn boot(ext_flags: u16) -> Fat32BootSector {
+        use crate::fat32::{
+            OFF_BACKUP_BOOT_SECTOR, OFF_EXT_FLAGS, OFF_FS_INFO_SECTOR, OFF_ROOT_CLUSTER,
+            parse_boot_sector,
+        };
+
+        let mut s = crate::fat::tests::fat32_sector();
+        s[OFF_ROOT_CLUSTER..OFF_ROOT_CLUSTER + 4].copy_from_slice(&2u32.to_le_bytes());
+        s[OFF_FS_INFO_SECTOR..OFF_FS_INFO_SECTOR + 2].copy_from_slice(&1u16.to_le_bytes());
+        s[OFF_BACKUP_BOOT_SECTOR..OFF_BACKUP_BOOT_SECTOR + 2].copy_from_slice(&6u16.to_le_bytes());
+        s[OFF_EXT_FLAGS..OFF_EXT_FLAGS + 2].copy_from_slice(&ext_flags.to_le_bytes());
+
+        parse_boot_sector(&s, extent()).expect("the synthetic boot sector is valid FAT32")
+    }
+
+    /// A file entry named `FILEnn.TXT`.
+    fn numbered(n: usize) -> [u8; ENTRY_BYTES] {
+        let mut name = *b"FILE00  TXT";
+        name[4] = b'0' + (n / 10) as u8;
+        name[5] = b'0' + (n % 10) as u8;
+        entry(&name, ATTR_ARCHIVE)
+    }
+
+    #[test]
+    fn a_single_cluster_root_is_enumerated() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(
+            2,
+            &[
+                entry(b"TAPHFIX    ", ATTR_VOLUME_ID),
+                numbered(1),
+                numbered(2),
+            ],
+        );
+        // The value mkfs.vfat writes for a root directory of one cluster.
+        image.write_fat(FAT0_BASE, 2, 0x0FFF_FFF8);
+
+        let root = enumerate_root(&mut image, &boot, extent()).expect("enumerating");
+
+        assert_eq!(root.clusters, vec![2]);
+        assert_eq!(root.entries.len(), 3, "the terminator is not an entry");
+        assert_eq!(root.file_count(), 2);
+        assert!(root.observations.is_empty(), "got {:?}", root.observations);
+    }
+
+    /// `mkfs.vfat` terminates the root directory with `0x0FFFFFF8` and files
+    /// with `0x0FFFFFFF`. Testing end of chain by equality against the latter
+    /// would walk past the end of the root directory on every volume the
+    /// project's own fixtures contain.
+    #[test]
+    fn end_of_chain_is_a_range_not_an_equality() {
+        for eoc in [0x0FFF_FFF8u32, 0x0FFF_FFFF] {
+            let boot = boot(0);
+            let mut image = MemoryImage::new(IMAGE_BYTES);
+            image.write_cluster(2, &[numbered(1)]);
+            image.write_fat(FAT0_BASE, 2, eoc);
+
+            let root = enumerate_root(&mut image, &boot, extent())
+                .unwrap_or_else(|e| panic!("{eoc:#010x} must end the chain, got {e}"));
+            assert_eq!(root.clusters, vec![2], "for {eoc:#010x}");
+        }
+    }
+
+    /// The shape of `fat32-root-multicluster.img`: a full first cluster with
+    /// no terminator in it, chaining to a non-adjacent second cluster.
+    #[test]
+    fn the_chain_is_followed_to_a_non_adjacent_cluster() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        let mut first = vec![entry(b"TAPHFIX    ", ATTR_VOLUME_ID)];
+        first.extend((1..=15).map(numbered));
+        assert_eq!(
+            first.len(),
+            CLUSTER_BYTES / ENTRY_BYTES,
+            "cluster must be full"
+        );
+        image.write_cluster(2, &first);
+
+        let second: Vec<_> = (16..=20).map(numbered).collect();
+        image.write_cluster(19, &second);
+
+        image.write_fat(FAT0_BASE, 2, 19);
+        image.write_fat(FAT0_BASE, 19, 0x0FFF_FFFF);
+
+        let root = enumerate_root(&mut image, &boot, extent()).expect("enumerating");
+
+        assert_eq!(root.clusters, vec![2, 19]);
+        assert_eq!(root.entries.len(), 21);
+        assert_eq!(root.file_count(), 20);
+        assert_eq!(
+            root.entries[16].cluster, 19,
+            "an entry records the cluster it was read from"
+        );
+    }
+
+    /// The high four bits of a FAT32 entry are reserved and must be masked
+    /// off. No fixture sets them, because no formatting tool writes them,
+    /// so this path exists only here.
+    #[test]
+    fn the_reserved_bits_of_a_fat_entry_are_masked() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[numbered(1)]);
+        image.write_cluster(19, &[numbered(2)]);
+        image.write_fat(FAT0_BASE, 2, 0xF000_0013);
+        image.write_fat(FAT0_BASE, 19, 0xFFFF_FFFF);
+
+        let root = enumerate_root(&mut image, &boot, extent()).expect("enumerating");
+
+        assert_eq!(
+            root.clusters,
+            vec![2, 19],
+            "0xF0000013 addresses cluster 19, and 0xFFFFFFFF ends the chain"
+        );
+    }
+
+    /// `KNOWN_ISSUES.md` records that no fixture exercises FAT mirroring,
+    /// because `mkfs.vfat` offers no option to set `BPB_ExtFlags` and writes
+    /// both FATs identically. The in-memory reader can, so the path M5 is
+    /// the first to depend on is covered here.
+    #[test]
+    fn the_active_fat_is_read_when_mirroring_is_disabled() {
+        let boot = boot(0x0081);
+        assert_eq!(boot.active_fat(), Some(1), "fixture premise");
+
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[numbered(1)]);
+        image.write_cluster(19, &[numbered(2)]);
+
+        // FAT 0 is stale and says the directory ends at cluster 2.
+        image.write_fat(FAT0_BASE, 2, 0x0FFF_FFFF);
+        // FAT 1 is the maintained copy.
+        image.write_fat(FAT1_BASE, 2, 19);
+        image.write_fat(FAT1_BASE, 19, 0x0FFF_FFFF);
+
+        let root = enumerate_root(&mut image, &boot, extent()).expect("enumerating");
+
+        assert_eq!(
+            root.clusters,
+            vec![2, 19],
+            "reading FAT 0 would stop at cluster 2 and lose half the directory"
+        );
+    }
+
+    #[test]
+    fn mirroring_enabled_reads_fat_zero() {
+        let boot = boot(0);
+        assert_eq!(boot.active_fat(), None, "fixture premise");
+
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[numbered(1)]);
+        image.write_fat(FAT0_BASE, 2, 0x0FFF_FFFF);
+        // FAT 1 disagrees. With mirroring enabled it must not be consulted.
+        image.write_fat(FAT1_BASE, 2, 19);
+
+        let root = enumerate_root(&mut image, &boot, extent()).expect("enumerating");
+        assert_eq!(root.clusters, vec![2]);
+    }
+
+    /// The entry bound alone would terminate this walk, at 65,536 entries.
+    /// Detecting the cycle is what distinguishes a corrupt chain from a
+    /// directory that is merely too large. ADR-0007 Appendix B.3.
+    #[test]
+    fn a_cyclic_chain_is_named_as_a_cycle() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[numbered(1)]);
+        image.write_cluster(3, &[numbered(2)]);
+        image.write_fat(FAT0_BASE, 2, 3);
+        image.write_fat(FAT0_BASE, 3, 2);
+
+        assert!(
+            matches!(
+                enumerate_root(&mut image, &boot, extent()),
+                Err(DirectoryError::CyclicChain { cluster: 2 })
+            ),
+            "a loop must be reported as a loop, not as an oversized directory"
+        );
+    }
+
+    #[test]
+    fn a_chain_link_to_a_reserved_cluster_is_refused() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[numbered(1)]);
+        image.write_fat(FAT0_BASE, 2, 1);
+
+        assert!(matches!(
+            enumerate_root(&mut image, &boot, extent()),
+            Err(DirectoryError::ReservedChainLink { from: 2, next: 1 })
+        ));
+    }
+
+    #[test]
+    fn a_chain_link_beyond_the_data_region_is_refused() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[numbered(1)]);
+        image.write_fat(FAT0_BASE, 2, CLUSTER_COUNT + 2);
+
+        match enumerate_root(&mut image, &boot, extent()) {
+            Err(DirectoryError::ClusterOutOfRange {
+                cluster,
+                cluster_count,
+            }) => {
+                assert_eq!(cluster, CLUSTER_COUNT + 2);
+                assert_eq!(cluster_count, CLUSTER_COUNT);
+            }
+            other => panic!("expected ClusterOutOfRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bad_cluster_in_the_chain_is_refused() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[numbered(1)]);
+        image.write_fat(FAT0_BASE, 2, FAT_BAD_CLUSTER);
+
+        assert!(matches!(
+            enumerate_root(&mut image, &boot, extent()),
+            Err(DirectoryError::BadCluster { .. })
+        ));
+    }
+
+    /// ADR-0008 decision C. The specification says nothing follows a
+    /// terminator; formatters exist that write one without clearing what
+    /// follows, and on real evidence that residue is a record of what the
+    /// directory previously held.
+    #[test]
+    fn content_after_the_terminator_is_reported_not_discarded() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        let mut cluster = vec![0u8; CLUSTER_BYTES];
+        cluster[..ENTRY_BYTES].copy_from_slice(&numbered(1));
+        // Slot 1 is left zeroed: the terminator.
+        let residue = numbered(9);
+        cluster[5 * ENTRY_BYTES..6 * ENTRY_BYTES].copy_from_slice(&residue);
+        image.write(CLUSTER2_BASE, &cluster);
+        image.write_fat(FAT0_BASE, 2, 0x0FFF_FFFF);
+
+        let root = enumerate_root(&mut image, &boot, extent()).expect("enumerating");
+
+        assert_eq!(
+            root.entries.len(),
+            1,
+            "the listing ends at the terminator, so the residue is not listed"
+        );
+        assert_eq!(
+            root.observations,
+            vec![DirectoryObservation::ContentAfterTerminator {
+                cluster: 2,
+                first_slot: 5,
+                slots: 1,
+            }],
+            "but it is reported rather than discarded"
+        );
+    }
+
+    #[test]
+    fn an_invalid_attribute_is_reported_and_the_entry_retained() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[entry(b"CONFUSED   ", ATTR_DIRECTORY | ATTR_VOLUME_ID)]);
+        image.write_fat(FAT0_BASE, 2, 0x0FFF_FFFF);
+
+        let root = enumerate_root(&mut image, &boot, extent()).expect("enumerating");
+
+        assert_eq!(root.entries.len(), 1, "an invalid entry is still evidence");
+        assert!(matches!(
+            root.observations.first(),
+            Some(DirectoryObservation::InvalidAttribute {
+                cluster: 2,
+                slot: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_name_outside_printable_ascii_is_reported_with_its_raw_bytes() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        image.write_cluster(2, &[entry(b"CAF\xe9    TXT", ATTR_ARCHIVE)]);
+        image.write_fat(FAT0_BASE, 2, 0x0FFF_FFFF);
+
+        let root = enumerate_root(&mut image, &boot, extent()).expect("enumerating");
+
+        match root.observations.first() {
+            Some(DirectoryObservation::NameNotPrintableAscii { raw_name, .. }) => {
+                assert_eq!(raw_name, b"CAF\xe9    TXT");
+                let rendered = root.observations[0].to_string();
+                assert!(
+                    rendered.contains("434146e9"),
+                    "raw evidence bytes must reach the reader as hex, not as \
+                     characters: {rendered}"
+                );
+            }
+            other => panic!("expected NameNotPrintableAscii, got {other:?}"),
+        }
+    }
+
+    /// The double must fail where `EvidenceFile` fails. If it padded short
+    /// reads with zeros instead, every test above would pass against
+    /// behaviour the real type does not have.
+    #[test]
+    fn a_read_past_the_end_of_evidence_fails() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(CLUSTER2_BASE);
+
+        assert!(matches!(
+            enumerate_root(&mut image, &boot, extent()),
+            Err(DirectoryError::Evidence(_))
+        ));
+    }
+}
