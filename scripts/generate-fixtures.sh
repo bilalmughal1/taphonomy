@@ -427,6 +427,57 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 14. FAT32 volume whose root directory spans more than one cluster.
+#     Fixture 13 has a root directory of one cluster, so its FAT entry is an
+#     end-of-chain mark and nothing in the fixture set exercises cluster
+#     chain walking. This fixture does.
+#
+#     At 512 bytes per cluster the root directory holds sixteen 32-byte
+#     entries. The volume label takes the first, so twenty files require a
+#     second cluster. The names are pure uppercase 8.3, which produces one
+#     entry each and no long-name entries, so the entry count is predictable
+#     rather than emergent.
+#
+#     Every file carries content. A zero-length file records a first cluster
+#     of zero and consumes no cluster, which would leave the root directory
+#     growing into the adjacent cluster and let a walk that ignores the FAT
+#     pass. With content, the files consume clusters before the root needs to
+#     grow, and the root's chain is non-contiguous. See ADR-0008 section 8.3.
+# ---------------------------------------------------------------------------
+fixture_fat32_root_multicluster() {
+    local path="$OUT_DIR/fat32-root-multicluster.img"
+    printf 'fat32-root-multicluster.img\n'
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730006
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work
+    work="$(mktemp -d)"
+
+    # Brace expansion rather than seq, so the ordering is fixed by the shell
+    # and no tool beyond those already required is introduced.
+    local n
+    for n in {01..20}; do
+        printf 'taphonomy fixture file %s\n' "$n" > "$work/FILE$n.TXT"
+        MTOOLS_SKIP_CHECK=1 mcopy -i "${path}@@${VBR_OFFSET}" \
+            "$work/FILE$n.TXT" "::/FILE$n.TXT"
+    done
+
+    rm -rf "$work"
+
+    note "root directory spanning two clusters, twenty 8.3 entries"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -443,6 +494,7 @@ fixture_fat32_hidden_mismatch
 fixture_fat32_bad_root_cluster
 fixture_fat32_undersized_fat
 fixture_fat32_root_entries
+fixture_fat32_root_multicluster
 
 # ---------------------------------------------------------------------------
 # Manifest
