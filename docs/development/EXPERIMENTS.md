@@ -255,7 +255,7 @@ which is the property the manifest exists to establish.
 Limitations item 3 relies on it — but the figure was never entered here. The
 gap is in this record, not in the measurement.
 
-### Structural verification of the new fixture
+#### Structural verification of the new fixture
 
 Determinism establishes that the fixture is reproducible. It does not
 establish that the fixture exercises what it was built to exercise. The
