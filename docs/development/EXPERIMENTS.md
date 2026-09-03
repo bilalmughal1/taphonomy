@@ -232,6 +232,66 @@ the property the manifest exists to establish.
 
 The conclusion is unchanged.
 
+### Re-measurement 2026-09-03
+
+The fixture set grew to fourteen with the addition of
+`fat32-root-multicluster.img`, a FAT32 volume whose root directory occupies
+more than one cluster. ADR-0008 §8.1 records why it was needed: every
+earlier fixture has a single-cluster root directory, so no fixture exercised
+cluster chain walking.
+
+`verify-fixtures.sh` was re-run and reported 14 of 14 byte-identical.
+
+```text
+Deterministic: 14/14 fixtures byte-identical across runs.
+```
+
+The manifest gained one line and the other thirteen digests are unchanged,
+which is the property the manifest exists to establish.
+
+**This series moves from twelve to fourteen.** The thirteenth fixture,
+`fat32-root-entries.img`, was confirmed byte-identical when it was added on
+2026-08-31 — EXP-0002 Next action item 3 records that as done, and EXP-0002
+Limitations item 3 relies on it — but the figure was never entered here. The
+gap is in this record, not in the measurement.
+
+### Structural verification of the new fixture
+
+Determinism establishes that the fixture is reproducible. It does not
+establish that the fixture exercises what it was built to exercise. The
+file allocation table was read directly:
+
+```text
+xxd -s 1064960 -l 16 fixtures/partition/fat32-root-multicluster.img
+  00104000: f8ff ff0f ffff ff0f 1300 0000 ffff ff0f
+
+FAT[2] = 0x00000013, the root directory continues at cluster 19
+```
+
+The root directory chain is 2 → 19 → end of chain. The first cluster holds
+the volume label and `FILE01` through `FILE15`: sixteen entries, completely
+full, with no terminator anywhere in it. The second holds `FILE16` through
+`FILE20` followed by a `0x00` terminator.
+
+Cluster 19 sits between file data on both sides. Cluster 18 holds
+`FILE16`'s content and cluster 20 holds `FILE17`'s, because the root
+directory grew only when its seventeenth entry would not fit. A chain walk
+that read the adjacent cluster instead of following the FAT would therefore
+read file text rather than directory entries, and would fail visibly rather
+than producing plausible output.
+
+The fixture consequently proves three properties a single-cluster root
+directory cannot: that the walk follows the FAT, that it does not treat a
+full cluster as terminated, and that a terminator in a later cluster ends
+the listing correctly.
+
+One gap remains. `FAT[2]` is `0x00000013` with its high nibble zero, so no
+fixture sets the reserved bits of a FAT32 entry. The 28-bit mask required
+by ADR-0008 §8.2 is not exercised by any image and must be covered by a
+unit test against an in-memory reader.
+
+The conclusion is unchanged.
+
 ---
 
 ## EXP-0002: Determinism of mtools directory entry timestamps
