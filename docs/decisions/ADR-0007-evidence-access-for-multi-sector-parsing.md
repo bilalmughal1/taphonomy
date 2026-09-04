@@ -463,3 +463,156 @@ covers a claim about what an external document says.
 The requirement that does cover it — read the source, quote it, and do not
 paraphrase from recollection — was not followed. Every claim in `ADR-0008`
 §8.2 was read from the specification directly for that reason.
+
+## Appendix C: Corrections to §5.3 (2026-09-04)
+
+Two factual errors, found while scoping M6 at `bc8366e`. The body above is
+left unmodified.
+
+Both were measured rather than argued. EXP-0003, recorded in
+`EXPERIMENTS.md` on 2026-09-04, deletes files from a FAT32 volume with
+`mtools` and compares the result against the volume it was made from, byte
+by byte.
+
+The decision taken in §2 is unaffected. §5.4's constraint on enumeration is
+unaffected and is strengthened: what it requires turns out to be load-bearing
+for a reason §5.3 did not identify. §5.5 is unaffected and remains open.
+
+The implementation decisions arising from the same work are recorded in
+`ADR-0009`, not here, because an appendix corrects a fact and a new ADR makes
+or amends a decision.
+
+### C.1 Correction to §5.3: the long-name entries do not survive deletion
+
+§5.3 states that deletion overwrites the first byte of the short entry, and
+that the preceding long-name entries survive.
+
+**The second half is wrong.** Deletion marks every entry in the set, not
+only the short one. Measured, on a file named `a long deleted name.txt`
+occupying two long-name entries and one short entry:
+
+```text
+slot   before deletion              after mdel
+2      LDIR_Ord 0x42                LDIR_Ord 0xE5
+3      LDIR_Ord 0x01                LDIR_Ord 0xE5
+4      first name byte 0x41 'A'     first name byte 0xE5
+```
+
+Thirty bytes changed in the whole 64 MiB image. Five of them were the first
+byte of a directory entry, and three of those five belonged to this set.
+
+What §5.3 concludes from the claim is nonetheless correct, and correct for
+the reason it gives: byte 0 of a long-name entry is `LDIR_Ord`, and
+`LDIR_Name1` begins at byte 1, so no name character is destroyed. The name
+characters survive. The entries do not.
+
+**The consequence §5.3 does not draw.** If byte 0 of every long-name entry
+becomes `0xE5`, then the sequence numbers are destroyed along with it, and
+they are destroyed in a way that is not obviously destruction. `0xE5` is
+`1110 0101`, and bit 6 is `LAST_LONG_ENTRY`. So for every component of a
+deleted set:
+
+```text
+LDIR_Ord & 0x40   is non-zero      every component reads as the last one
+LDIR_Ord & ~0x40  is 0xA5, or 165  every component reads as ordinal 165
+```
+
+Neither value is evidence of anything. Both are artefacts of the deletion
+marker, and both are plausible enough to be believed by code that reads them
+without knowing the entry is deleted.
+
+The order of a deleted long-name set is therefore recoverable only from the
+position of each entry relative to the short entry that follows it. That is
+exactly what §5.4 requires enumeration to preserve. §5.4 justifies the
+requirement by the cost of reintroducing filtered entries at M6; the stronger
+justification is that for a deleted set, position is the only ordering
+evidence that exists at all.
+
+### C.2 Correction to §5.3: the checksum also determines the first character
+
+§5.3 states, in bold, that for a deleted long-named file the long-name
+entries are the only surviving source of the first character of the filename.
+
+**That is wrong**, and it is wrong in a way that was available to reasoning
+at the time rather than requiring a measurement.
+
+The long-name checksum at `LDIR_Chksum` is computed over the eleven bytes of
+the short name. Ten of those eleven survive deletion. The specification's
+`ChkSum()` performs eleven rounds of a rotation followed by an addition
+modulo 256. Rotation is a bijection on 256 values; addition of a fixed byte
+modulo 256 is a bijection; and the first byte enters as the initial value,
+since the accumulator starts at zero. The composition is therefore a
+bijection, and **exactly one** of the 256 candidate first bytes reproduces
+any given checksum.
+
+The destroyed byte is not narrowed by the checksum. It is determined by it.
+
+Measured against the deleted entry above, using the surviving ten bytes and
+the surviving checksum:
+
+```text
+surviving name bytes  LONGD~1TXT
+surviving checksum    0x32
+candidates            0x41, and no other
+```
+
+`0x41` is `A`. The name was `ALONGD~1.TXT`.
+
+Two candidate values can never be correct, which makes the derivation
+self-checking at no cost. `0x00` is the directory terminator and `0xE5` is
+never stored literally, being escaped to `0x05`. A derivation producing
+either is proof that the long-name set does not belong to the short entry
+that follows it. A derivation producing `0x05` means the recovered character
+is `0xE5`.
+
+**The distinction this collapses.** §5.3 concludes that long-name handling is
+load-bearing for recovery rather than a display convenience. That holds for
+retention and does not hold for decoding:
+
+- **Retention is load-bearing.** The checksum byte exists nowhere else. An
+  enumeration that discarded `0x0F` entries would destroy the only means of
+  recovering the short name's first character.
+- **Decoding is not.** Not one name character is required. The derivation
+  uses `LDIR_Chksum`, a single byte, and no part of `LDIR_Name1`,
+  `LDIR_Name2` or `LDIR_Name3`.
+
+The correction therefore runs in two directions at once. It removes decoding
+from the recovery path, and it makes retention — §5.4's constraint —
+indispensable rather than merely convenient.
+
+**The two methods are independent and should both be used.** §5.3's method
+reads the character from the long-name entry; this one derives it from the
+checksum and the surviving short name. They share no input byte. Where both
+are available and agree, the agreement is corroboration rather than
+repetition. Where they disagree, the set does not belong to the entry.
+
+§5.3's method also depends on identifying the correct long-name entry, which
+is the one holding characters 1 to 13. Long-name entries are stored in
+reverse, so that entry is the one numbered 1 and stored immediately before
+the short entry — not the one flagged `LAST_LONG_ENTRY`, which holds the
+final fragment and is stored first. Since C.1 establishes that the ordinals
+are destroyed, that entry can only be identified by position. `ADR-0009`
+records this as an implementation constraint.
+
+### C.3 Cause
+
+Two different causes, and only one of them was unavoidable.
+
+C.1 was not measurable when §5.3 was written. What deletion destroys is not
+in the FAT32 specification, which states only that a first byte of `0xE5`
+marks an entry free and is silent on what else an implementation may do at
+the same moment. The claim could only be settled by measuring a specific
+implementation, and no such measurement existed until EXP-0003. §5.3 was
+written from accounts of what forensic recovery relies on, which describe
+what survives usefully rather than what is written.
+
+C.2 has no such excuse. The bijection is a property of the checksum function
+printed in the specification §5.3 already relies on. It required no
+measurement, no fixture and no tool — only the observation that each round
+of `ChkSum()` is invertible in its accumulator. The claim that the long-name
+entries are the *only* surviving source is a claim about what is impossible,
+and no attempt was made to derive the alternative before asserting it.
+
+The general form: a negative claim about what cannot be recovered is a
+stronger claim than a positive one about what can, and warrants more work
+before it is written down, not less. §5.3 states its negative claim in bold.
