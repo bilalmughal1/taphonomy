@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 use taphonomy::EvidenceFile;
 use taphonomy::fat_directory::{
-    DeletedKind, DirectoryObservation, EntryKind, enumerate_root, recover_first_byte,
+    DeletedKind, DirectoryObservation, EntryKind, FirstByte, associate, enumerate_root,
+    recovered_name,
 };
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{VBR_SIZE, VolumeExtent};
@@ -449,36 +450,104 @@ fn every_deleted_shape_in_the_fixture_is_classified() {
     assert_eq!(*nt_res, 0x08, "created as ::/gone, lowercase stem");
 }
 
-/// The destroyed byte is determined by the checksum, not narrowed by it.
+/// The destroyed byte is determined by the checksum, not narrowed by it, and
+/// the entry holding that checksum is found rather than supplied.
 ///
 /// Both sets recover the byte `mtools` wrote before `mdel` overwrote it:
-/// `PARTIA~1.TXT` and `COMPLE~1.TXT`. ADR-0009 section 6.1.
+/// `PARTIA~1.TXT` and `COMPLE~1.TXT`. ADR-0009 sections 6.1 and 6.3.
+///
+/// An earlier version of this test named the slot pairs (3, 4) and (7, 8)
+/// itself, from a manual decode of the fixture. It passed because its author
+/// knew the answer. Nothing is supplied here but the position of the short
+/// entry, which the enumeration reports.
 #[test]
 fn a_deleted_first_byte_is_recovered_from_its_long_name_set() {
     let (mut evidence, boot, extent) = open_volume("fat32-deleted-entries.img");
     let root = enumerate_root(&mut evidence, &boot, extent).expect("enumerating");
 
-    for (component, short, expected) in [(3, 4, b'P'), (7, 8, b'C')] {
-        let EntryKind::Deleted {
-            was: DeletedKind::LongName { checksum },
-        } = &root.entries[component].kind
-        else {
-            panic!("slot {component} must be a deleted long-name component");
-        };
+    let recovered: Vec<String> = (0..root.entries.len())
+        .filter_map(|index| match associate(&root.entries, index) {
+            Some(FirstByte::Recovered(byte)) => {
+                let EntryKind::Deleted {
+                    was: DeletedKind::ShortName { surviving_name, .. },
+                } = &root.entries[index].kind
+                else {
+                    panic!("associate answered for something that is not a deleted short entry");
+                };
 
-        let EntryKind::Deleted {
-            was: DeletedKind::ShortName { surviving_name, .. },
-        } = &root.entries[short].kind
-        else {
-            panic!("slot {short} must be a deleted short entry");
-        };
+                recovered_name(byte, surviving_name)
+            }
+            _ => None,
+        })
+        .collect();
 
-        assert_eq!(
-            recover_first_byte(surviving_name, *checksum),
-            Some(expected),
-            "recovering slot {short} from the checksum in slot {component}"
-        );
-    }
+    assert_eq!(
+        recovered,
+        vec!["PARTIA~1.TXT".to_string(), "COMPLE~1.TXT".to_string()],
+        "both names, in on-disk order, found without being told where to look"
+    );
+}
+
+/// The three outcomes of association, each present in the fixture.
+///
+/// Slot 4 is named by a set that lost a component to slot reuse and still
+/// recovers. Slot 5 is a subdirectory whose 8.3 name needed no long-name set,
+/// so nothing constrains its first byte. Slot 10 is a file whose preceding
+/// entry is live. ADR-0009 sections 6.2 and 6.4.
+#[test]
+fn association_reports_what_it_could_not_recover() {
+    let (mut evidence, boot, extent) = open_volume("fat32-deleted-entries.img");
+    let root = enumerate_root(&mut evidence, &boot, extent).expect("enumerating");
+
+    assert_eq!(
+        associate(&root.entries, 4),
+        Some(FirstByte::Recovered(b'P')),
+        "a partial set still determines the byte"
+    );
+
+    assert_eq!(
+        associate(&root.entries, 5),
+        Some(FirstByte::Destroyed),
+        "mmd wrote no long-name set for a name that fits 8.3"
+    );
+
+    assert_eq!(
+        associate(&root.entries, 10),
+        Some(FirstByte::Destroyed),
+        "the entry before it is live, so no set belongs to it"
+    );
+
+    assert_eq!(
+        associate(&root.entries, 9),
+        None,
+        "KEEP.TXT is allocated, so its first byte was never destroyed"
+    );
+}
+
+/// Association works on the residue exactly as on the listing, and the two
+/// are indexed independently: the set at slots 6 to 8 occupies residue
+/// positions 0 to 2.
+#[test]
+fn association_works_past_the_terminator() {
+    let (mut evidence, boot, extent) = open_volume("fat32-deleted-residue.img");
+    let root = enumerate_root(&mut evidence, &boot, extent).expect("enumerating");
+
+    let EntryKind::Deleted {
+        was: DeletedKind::ShortName { surviving_name, .. },
+    } = &root.residue[2].kind
+    else {
+        panic!("residue position 2 must be a deleted short entry");
+    };
+
+    let Some(FirstByte::Recovered(byte)) = associate(&root.residue, 2) else {
+        panic!("residue position 2 must recover its first byte");
+    };
+
+    assert_eq!(root.residue[2].slot, 8, "residue position 2 is slot 8");
+    assert_eq!(
+        recovered_name(byte, surviving_name),
+        Some("COMPLE~1.TXT".to_string())
+    );
 }
 
 /// Slot reuse consumed one component of the first set and neither of the
@@ -574,25 +643,9 @@ fn the_residue_fixture_ends_early_and_reports_what_follows() {
     assert_eq!(root.residue[0].slot, 6);
     assert_eq!(root.residue[4].slot, 10);
 
-    // The complete long-name set and the short entry it names both lie past
-    // the terminator, so the recovery works on residue exactly as it works
-    // on the listing.
-    let EntryKind::Deleted {
-        was: DeletedKind::LongName { checksum },
-    } = &root.residue[1].kind
-    else {
-        panic!("residue slot 7 must be a deleted long-name component");
-    };
-
-    let EntryKind::Deleted {
-        was: DeletedKind::ShortName { surviving_name, .. },
-    } = &root.residue[2].kind
-    else {
-        panic!("residue slot 8 must be a deleted short entry");
-    };
-
-    assert_eq!(recover_first_byte(surviving_name, *checksum), Some(b'C'));
-
+    // Recovery past the terminator is asserted by
+    // association_works_past_the_terminator, which finds the components
+    // rather than destructuring them by hand as this block did.
     assert!(
         matches!(root.residue[3].kind, EntryKind::ShortName { .. }),
         "a live entry sits past the terminator too, which is why residue is \
