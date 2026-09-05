@@ -6,15 +6,23 @@ The project is designed around evidence preservation, correctness, security, rep
 
 ## Project Status
 
-Taphonomy has a validated read-only evidence layer. No recovery capability is
-implemented yet.
+Taphonomy has a validated read-only evidence layer and reads FAT32 root
+directories. No recovery capability is implemented yet: nothing reads file
+content.
 
-Milestones M1 to M4 of ADR-0002 §8 are complete: evidence images are
+Milestones M1 to M6 of ADR-0002 §8 are complete: evidence images are
 opened read-only and hashed, MBR partition tables are parsed with every
 declared extent validated against the true evidence size, GPT is detected
 and reported as unsupported, filesystems are identified from volume
-structure, and FAT32 boot sectors are parsed and validated against the
-partition extent they occupy.
+structure, FAT32 boot sectors are parsed and validated against the
+partition extent they occupy, the root directory is enumerated by walking
+its cluster chain, and the deleted entries within it are identified.
+
+A deleted entry is reported with whatever fields deletion left intact.
+Where a long-name entry survives alongside it, the first character of its
+short name is recovered from the checksum that entry carries, which
+determines the destroyed byte rather than narrowing it. Where none
+survives, that is reported rather than guessed.
 
 The initial development sequence is:
 
@@ -240,10 +248,12 @@ docs/decisions/
 At this stage:
 
 * no recovery capability is implemented
-* only FAT32 boot sectors are parsed; no other filesystem is parsed
-* FAT32 support stops at the boot sector; the file allocation table and
-  directories are not read
-* no file or directory data is read
+* only FAT32 is parsed beyond the partition table; exFAT and NTFS are
+  identified and reported as unsupported
+* FAT32 support stops at the root directory; subdirectories are not read
+* no file content is read
+* the long name of a deleted entry is not decoded; only its short name is
+  recovered, and only where a long-name entry survives to determine it
 * only MBR partition tables are parsed; GPT is detected but not parsed
 * only 512-byte sectors are supported
 * physical-device recovery is not supported
