@@ -569,4 +569,33 @@ fn the_residue_fixture_ends_early_and_reports_what_follows() {
         }],
         "five slots past the terminator still hold entries"
     );
+
+    assert_eq!(root.residue.len(), 5, "and all five are now classified");
+    assert_eq!(root.residue[0].slot, 6);
+    assert_eq!(root.residue[4].slot, 10);
+
+    // The complete long-name set and the short entry it names both lie past
+    // the terminator, so the recovery works on residue exactly as it works
+    // on the listing.
+    let EntryKind::Deleted {
+        was: DeletedKind::LongName { checksum },
+    } = &root.residue[1].kind
+    else {
+        panic!("residue slot 7 must be a deleted long-name component");
+    };
+
+    let EntryKind::Deleted {
+        was: DeletedKind::ShortName { surviving_name, .. },
+    } = &root.residue[2].kind
+    else {
+        panic!("residue slot 8 must be a deleted short entry");
+    };
+
+    assert_eq!(recover_first_byte(surviving_name, *checksum), Some(b'C'));
+
+    assert!(
+        matches!(root.residue[3].kind, EntryKind::ShortName { .. }),
+        "a live entry sits past the terminator too, which is why residue is \
+         not simply a list of deleted entries"
+    );
 }

@@ -411,6 +411,21 @@ pub struct RootDirectory {
     /// position they occupy relative to the short entry that follows them.
     pub entries: Vec<Entry>,
 
+    /// Slots holding non-zero bytes after the terminator, classified.
+    ///
+    /// Separate from `entries` because the distinction is the finding:
+    /// `entries` is what the volume claims is present, and this is what is
+    /// present anyway. Merging them would present a reconstruction as a
+    /// directory listing.
+    ///
+    /// A slot here may classify as [`EntryKind::Terminator`], which means
+    /// its first byte is zero and its remaining bytes are not.
+    ///
+    /// Bounded only indirectly, by the cluster limit that stops the walk.
+    /// The worst case is therefore about twice what `entries` alone permits.
+    /// ADR-0009 section 4.5 records why no second limit is imposed.
+    pub residue: Vec<Entry>,
+
     /// Clusters walked, in chain order.
     pub clusters: Vec<u32>,
 
@@ -433,10 +448,29 @@ impl RootDirectory {
     }
 
     /// Long-name components retained but not decoded.
+    ///
+    /// Counts allocated components only. A deleted one classifies as
+    /// [`EntryKind::Deleted`] and is counted by [`RootDirectory::deleted_count`].
     pub fn long_name_count(&self) -> usize {
         self.entries
             .iter()
             .filter(|e| matches!(e.kind, EntryKind::LongName { .. }))
+            .count()
+    }
+
+    /// Deleted entries in the listing, of any shape.
+    ///
+    /// Counted separately because the two counts above describe the
+    /// allocated listing and a deleted entry is not part of it. Without
+    /// this, a directory holding eight deleted entries and three live ones
+    /// reports three and appears to have lost the rest.
+    ///
+    /// Does not count [`RootDirectory::residue`], which is reported on its
+    /// own.
+    pub fn deleted_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::Deleted { .. }))
             .count()
     }
 }
@@ -714,6 +748,7 @@ pub fn enumerate_root<R: EvidenceReader>(
 
     let mut buffer = vec![0u8; cluster_bytes];
     let mut entries: Vec<Entry> = Vec::new();
+    let mut residue: Vec<Entry> = Vec::new();
     let mut clusters: Vec<u32> = Vec::new();
     let mut observations: Vec<DirectoryObservation> = Vec::new();
 
@@ -754,6 +789,15 @@ pub fn enumerate_root<R: EvidenceReader>(
                 if raw.iter().any(|b| *b != 0) {
                     residue_first.get_or_insert(slot);
                     residue_slots += 1;
+
+                    // No bound is applied here. The cluster limit above
+                    // already stops the walk, and a second limit would fail
+                    // a directory the first one permits. ADR-0009 §4.5.
+                    residue.push(Entry {
+                        cluster,
+                        slot,
+                        kind: classify(raw),
+                    });
                 }
                 continue;
             }
@@ -830,6 +874,7 @@ pub fn enumerate_root<R: EvidenceReader>(
 
     Ok(RootDirectory {
         entries,
+        residue,
         clusters,
         observations,
     })
@@ -1533,7 +1578,7 @@ mod tests {
         assert_eq!(
             root.entries.len(),
             1,
-            "the listing ends at the terminator, so the residue is not listed"
+            "the listing still ends at the terminator"
         );
         assert_eq!(
             root.observations,
@@ -1542,7 +1587,16 @@ mod tests {
                 first_slot: 5,
                 slots: 1,
             }],
-            "but it is reported rather than discarded"
+            "and the finding is still reported"
+        );
+
+        assert_eq!(root.residue.len(), 1, "but the slot is now classified");
+        assert_eq!(root.residue[0].cluster, 2);
+        assert_eq!(root.residue[0].slot, 5);
+        assert_eq!(
+            root.residue[0].kind,
+            classify(&residue),
+            "residue is classified by the same function as the listing"
         );
     }
 

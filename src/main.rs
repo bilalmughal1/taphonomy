@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
-use taphonomy::fat_directory::{DeletedKind, EntryKind, enumerate_root};
+use taphonomy::fat_directory::{DeletedKind, Entry, EntryKind, enumerate_root};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
@@ -207,6 +207,10 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition) {
 /// Every entry is listed. A directory may hold 65,536 of them, so this can
 /// be long, but truncating it would present a partial listing as a complete
 /// one, which `docs/PROJECT.md` section 5 forbids.
+///
+/// Entries past the terminator are listed separately and under their own
+/// heading. They are evidence of what the directory previously held, not a
+/// claim about what it holds now.
 fn report_root_directory(
     evidence: &mut EvidenceFile,
     boot: &Fat32BootSector,
@@ -227,48 +231,17 @@ fn report_root_directory(
     println!("      entries            {}", root.entries.len());
     println!("      short entries      {}", root.short_entry_count());
     println!("      long name entries  {}", root.long_name_count());
+    println!("      deleted entries    {}", root.deleted_count());
 
     for entry in &root.entries {
-        let position = format!("c{} s{}", entry.cluster, entry.slot);
+        print_entry(entry);
+    }
 
-        let (label, detail) = match &entry.kind {
-            EntryKind::VolumeLabel { name, .. } => {
-                ("volume label", rendered(name.as_deref()).to_string())
-            }
-            EntryKind::ShortName {
-                name,
-                directory,
-                first_cluster,
-                file_size,
-                ..
-            } => {
-                let name = rendered(name.as_deref());
-                if *directory {
-                    ("directory", format!("{name:<13} cluster {first_cluster}"))
-                } else {
-                    (
-                        "file",
-                        format!("{name:<13} {file_size} bytes, cluster {first_cluster}"),
-                    )
-                }
-            }
-            EntryKind::LongName { ordinal, last, .. } => {
-                let detail = if *last {
-                    format!("ordinal {ordinal}, last")
-                } else {
-                    format!("ordinal {ordinal}")
-                };
-                ("long name", detail)
-            }
-            EntryKind::Deleted { was } => ("deleted", deleted_detail(was)),
-            EntryKind::Invalid { attr } => ("invalid", format!("attribute {attr:#04x}")),
-            // The listing ends at the terminator and does not include it, so
-            // this arm is unreachable. It is written out rather than caught
-            // by a wildcard so that a new entry kind fails to compile here.
-            EntryKind::Terminator => ("terminator", String::new()),
-        };
-
-        println!("      {position:<9} {label:<13} {detail}");
+    if !root.residue.is_empty() {
+        println!("      past the terminator");
+        for entry in &root.residue {
+            print_entry(entry);
+        }
     }
 
     if !root.observations.is_empty() {
@@ -286,6 +259,57 @@ fn report_root_directory(
 /// reaching the terminal as characters.
 fn rendered(name: Option<&str>) -> &str {
     name.unwrap_or("<not printable ascii>")
+}
+
+/// Prints one entry, from the listing or from the residue.
+///
+/// Both are printed the same way and in the same columns, because both are
+/// directory entries read from the same bytes. Which vector an entry came
+/// from is shown by the heading above it, not by its formatting.
+fn print_entry(entry: &Entry) {
+    let position = format!("c{} s{}", entry.cluster, entry.slot);
+    let (label, detail) = describe(&entry.kind);
+
+    println!("      {position:<9} {label:<13} {detail}");
+}
+
+/// A label and a one-line description for one classified entry.
+fn describe(kind: &EntryKind) -> (&'static str, String) {
+    match kind {
+        EntryKind::VolumeLabel { name, .. } => {
+            ("volume label", rendered(name.as_deref()).to_string())
+        }
+        EntryKind::ShortName {
+            name,
+            directory,
+            first_cluster,
+            file_size,
+            ..
+        } => {
+            let name = rendered(name.as_deref());
+            if *directory {
+                ("directory", format!("{name:<13} cluster {first_cluster}"))
+            } else {
+                (
+                    "file",
+                    format!("{name:<13} {file_size} bytes, cluster {first_cluster}"),
+                )
+            }
+        }
+        EntryKind::LongName { ordinal, last, .. } => {
+            let detail = if *last {
+                format!("ordinal {ordinal}, last")
+            } else {
+                format!("ordinal {ordinal}")
+            };
+            ("long name", detail)
+        }
+        EntryKind::Deleted { was } => ("deleted", deleted_detail(was)),
+        EntryKind::Invalid { attr } => ("invalid", format!("attribute {attr:#04x}")),
+        // The listing never contains a terminator, but the residue can: a
+        // slot whose first byte is zero and whose remaining bytes are not.
+        EntryKind::Terminator => ("terminator", "first byte zero, rest not".to_string()),
+    }
 }
 
 /// What can be said about a deleted entry without inventing a name.
