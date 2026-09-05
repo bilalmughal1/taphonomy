@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
-use taphonomy::fat_directory::{EntryKind, enumerate_root};
+use taphonomy::fat_directory::{DeletedKind, EntryKind, enumerate_root};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
@@ -260,7 +260,7 @@ fn report_root_directory(
                 };
                 ("long name", detail)
             }
-            EntryKind::Deleted => ("deleted", String::new()),
+            EntryKind::Deleted { was } => ("deleted", deleted_detail(was)),
             EntryKind::Invalid { attr } => ("invalid", format!("attribute {attr:#04x}")),
             // The listing ends at the terminator and does not include it, so
             // this arm is unreachable. It is written out rather than caught
@@ -286,4 +286,33 @@ fn report_root_directory(
 /// reaching the terminal as characters.
 fn rendered(name: Option<&str>) -> &str {
     name.unwrap_or("<not printable ascii>")
+}
+
+/// What can be said about a deleted entry without inventing a name.
+///
+/// No name is printed. The first character is destroyed, and recovering it
+/// requires associating the entry with a surviving long-name set, which this
+/// milestone does not do. ADR-0009 section 6.4 forbids substituting a guess,
+/// and the surviving bytes are in the returned structure for any caller that
+/// wants them.
+fn deleted_detail(was: &DeletedKind) -> String {
+    match was {
+        DeletedKind::LongName { checksum } => {
+            format!("long name component, checksum {checksum:#04x}")
+        }
+        DeletedKind::VolumeLabel { .. } => "volume label".to_string(),
+        DeletedKind::ShortName {
+            directory,
+            first_cluster,
+            file_size,
+            ..
+        } => {
+            if *directory {
+                format!("directory, cluster {first_cluster}")
+            } else {
+                format!("file, {file_size} bytes, cluster {first_cluster}")
+            }
+        }
+        DeletedKind::Invalid { attr } => format!("invalid, attribute {attr:#04x}"),
+    }
 }

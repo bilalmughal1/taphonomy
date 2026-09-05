@@ -124,9 +124,12 @@ pub enum EntryKind {
 
     /// Free, and previously used.
     ///
-    /// Carries no payload in M5, which does not attempt recovery. M6 will
-    /// need the remaining bytes.
-    Deleted,
+    /// The first byte is destroyed. What the entry was is read from the
+    /// bytes deletion left alone. ADR-0009 section 3.
+    Deleted {
+        /// What the surviving bytes establish the entry to have been.
+        was: DeletedKind,
+    },
 
     /// One component of a long-name set.
     ///
@@ -172,6 +175,60 @@ pub enum EntryKind {
     ///
     /// The specification's own classification names this combination
     /// invalid rather than assigning it a meaning.
+    Invalid {
+        /// The attribute byte as stored.
+        attr: u8,
+    },
+}
+
+/// What a deleted entry was, as far as its surviving bytes establish.
+///
+/// Corresponds one to one with the live classification [`classify`]
+/// performs, minus every field the deletion marker destroys. Those fields
+/// are absent rather than computed: an absent field prompts a question and a
+/// wrong one does not.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DeletedKind {
+    /// One component of a long-name set.
+    ///
+    /// The ordinal and the last-entry flag are not carried. Both live in the
+    /// destroyed first byte, and `0xE5` has bit 6 set, so every deleted
+    /// component reads as ordinal 165 and as the last of its set whatever it
+    /// was. EXP-0003 section 4.
+    ///
+    /// Order is recoverable only from position relative to the short entry
+    /// that follows the set.
+    LongName {
+        /// Checksum of the short name the set belongs to, undamaged.
+        checksum: u8,
+    },
+
+    /// The volume label.
+    VolumeLabel {
+        /// Bytes 1 to 10 of the name field. Byte 0 is destroyed.
+        surviving_name: [u8; NAME_LEN - 1],
+    },
+
+    /// A file or subdirectory.
+    ///
+    /// No rendered name, because the first character is not yet known.
+    /// Recovering it requires the checksum from an associated long-name
+    /// entry, which needs a second entry and so cannot happen in
+    /// [`classify`]. See [`recover_first_byte`].
+    ShortName {
+        /// Bytes 1 to 10 of the name field. Byte 0 is destroyed.
+        surviving_name: [u8; NAME_LEN - 1],
+        /// Whether the directory attribute is set.
+        directory: bool,
+        /// First cluster, assembled from the high and low words.
+        first_cluster: u32,
+        /// Size in bytes. Always zero for a directory.
+        file_size: u32,
+        /// `DIR_NTRes`, recorded and not interpreted.
+        nt_res: u8,
+    },
+
+    /// Both the directory and volume-id attribute bits are set.
     Invalid {
         /// The attribute byte as stored.
         attr: u8,
@@ -391,21 +448,27 @@ impl RootDirectory {
 /// [`crate::filesystem::le_u16`] and [`crate::filesystem::le_u32`], which
 /// index without checking, is discharged by the compiler.
 ///
-/// The first byte is examined before the attribute, because a deleted
-/// long-name entry is deleted rather than a long name. The specification's
-/// test for a long name requires both the masked attribute to match and the
-/// first byte not to be the deleted marker.
+/// The first byte decides deletion before the attribute decides anything,
+/// because a deleted long-name entry is deleted rather than a long name. The
+/// specification's test for a long name requires both the masked attribute
+/// to match and the first byte not to be the deleted marker.
+///
+/// The attribute is then read a second time, by [`classify_deleted`], to say
+/// what the deleted entry was.
 pub fn classify(entry: &[u8; ENTRY_BYTES]) -> EntryKind {
     let first = entry[OFF_NAME];
 
     if first == NAME_TERMINATOR {
         return EntryKind::Terminator;
     }
-    if first == NAME_DELETED {
-        return EntryKind::Deleted;
-    }
 
     let attr = entry[OFF_ATTR];
+
+    if first == NAME_DELETED {
+        return EntryKind::Deleted {
+            was: classify_deleted(entry, attr),
+        };
+    }
 
     if attr & ATTR_LONG_NAME_MASK == ATTR_LONG_NAME {
         return EntryKind::LongName {
@@ -431,6 +494,41 @@ pub fn classify(entry: &[u8; ENTRY_BYTES]) -> EntryKind {
             EntryKind::ShortName {
                 name: short_name(&raw_name),
                 raw_name,
+                directory: attr & ATTR_DIRECTORY != 0,
+                first_cluster: (high << 16) | low,
+                file_size: le_u32(entry, OFF_FILE_SIZE),
+                nt_res: entry[OFF_NT_RES],
+            }
+        }
+    }
+}
+
+/// What a deleted entry was, read from the bytes deletion left alone.
+///
+/// Mirrors the branches of [`classify`] with the destroyed fields omitted.
+/// The attribute byte is passed in rather than re-read so that both
+/// functions demonstrably test the same byte.
+///
+/// Performs no I/O and cannot fail, for the reason given on [`classify`].
+fn classify_deleted(entry: &[u8; ENTRY_BYTES], attr: u8) -> DeletedKind {
+    if attr & ATTR_LONG_NAME_MASK == ATTR_LONG_NAME {
+        return DeletedKind::LongName {
+            checksum: entry[OFF_LDIR_CHKSUM],
+        };
+    }
+
+    let mut surviving_name = [0u8; NAME_LEN - 1];
+    surviving_name.copy_from_slice(&entry[OFF_NAME + 1..OFF_NAME + NAME_LEN]);
+
+    match attr & (ATTR_DIRECTORY | ATTR_VOLUME_ID) {
+        ATTR_VOLUME_ID => DeletedKind::VolumeLabel { surviving_name },
+        combined if combined == ATTR_DIRECTORY | ATTR_VOLUME_ID => DeletedKind::Invalid { attr },
+        _ => {
+            let high = le_u16(entry, OFF_FST_CLUS_HI) as u32;
+            let low = le_u16(entry, OFF_FST_CLUS_LO) as u32;
+
+            DeletedKind::ShortName {
+                surviving_name,
                 directory: attr & ATTR_DIRECTORY != 0,
                 first_cluster: (high << 16) | low,
                 file_size: le_u32(entry, OFF_FILE_SIZE),
@@ -772,10 +870,14 @@ mod tests {
     fn a_deleted_marker_is_deleted_before_the_attribute_is_read() {
         let mut e = entry(b"HELLO   TXT", ATTR_LONG_NAME);
         e[OFF_NAME] = NAME_DELETED;
+        // The checksum a real long-name entry would carry for HELLO.TXT.
+        e[OFF_LDIR_CHKSUM] = 0xF1;
 
         assert_eq!(
             classify(&e),
-            EntryKind::Deleted,
+            EntryKind::Deleted {
+                was: DeletedKind::LongName { checksum: 0xF1 }
+            },
             "a deleted long-name entry is deleted, not a long name"
         );
     }
@@ -957,6 +1059,112 @@ mod tests {
         assert!(
             matches!(classify(&e), EntryKind::ShortName { name: None, .. }),
             "0x05 stands for a literal 0xE5 and marks a live entry"
+        );
+    }
+
+    #[test]
+    fn a_deleted_short_entry_keeps_every_field_deletion_left() {
+        let mut e = entry(b"HELLO   TXT", ATTR_ARCHIVE);
+        e[OFF_NAME] = NAME_DELETED;
+        e[OFF_NT_RES] = 0x18;
+        e[OFF_FST_CLUS_HI] = 0x01;
+        e[OFF_FST_CLUS_LO] = 0x07;
+        e[OFF_FILE_SIZE] = 0x2A;
+
+        assert_eq!(
+            classify(&e),
+            EntryKind::Deleted {
+                was: DeletedKind::ShortName {
+                    surviving_name: *b"ELLO   TXT",
+                    directory: false,
+                    first_cluster: 0x0001_0007,
+                    file_size: 0x2A,
+                    nt_res: 0x18,
+                }
+            }
+        );
+    }
+
+    /// The marker is a known constant, so omitting it loses nothing. Carrying
+    /// it would invite rendering `0xE5` as the first character of a name.
+    #[test]
+    fn the_destroyed_byte_is_not_carried_in_the_surviving_name() {
+        let mut e = entry(b"HELLO   TXT", ATTR_ARCHIVE);
+        e[OFF_NAME] = NAME_DELETED;
+
+        let EntryKind::Deleted {
+            was: DeletedKind::ShortName { surviving_name, .. },
+        } = classify(&e)
+        else {
+            panic!("expected a deleted short entry");
+        };
+
+        assert_eq!(surviving_name.len(), NAME_LEN - 1);
+        assert!(!surviving_name.contains(&NAME_DELETED));
+    }
+
+    #[test]
+    fn a_deleted_directory_is_distinguished_from_a_deleted_file() {
+        let mut e = entry(b"LOGS       ", ATTR_DIRECTORY);
+        e[OFF_NAME] = NAME_DELETED;
+
+        let EntryKind::Deleted {
+            was: DeletedKind::ShortName { directory, .. },
+        } = classify(&e)
+        else {
+            panic!("expected a deleted short entry");
+        };
+
+        assert!(directory);
+    }
+
+    #[test]
+    fn a_deleted_volume_label_is_not_a_deleted_file() {
+        let mut e = entry(b"TAPHFIX    ", ATTR_VOLUME_ID);
+        e[OFF_NAME] = NAME_DELETED;
+
+        assert_eq!(
+            classify(&e),
+            EntryKind::Deleted {
+                was: DeletedKind::VolumeLabel {
+                    surviving_name: *b"APHFIX    ",
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn a_deleted_entry_with_both_attribute_bits_is_invalid() {
+        let attr = ATTR_DIRECTORY | ATTR_VOLUME_ID;
+        let mut e = entry(b"CONFUSED   ", attr);
+        e[OFF_NAME] = NAME_DELETED;
+
+        assert_eq!(
+            classify(&e),
+            EntryKind::Deleted {
+                was: DeletedKind::Invalid { attr }
+            }
+        );
+    }
+
+    /// A deleted long-name component reads as ordinal 165 and as the last of
+    /// its set, because 0xE5 has bit 6 set. Neither value is carried.
+    #[test]
+    fn a_deleted_long_name_carries_only_its_checksum() {
+        let mut e = entry(b"?          ", ATTR_LONG_NAME);
+        e[OFF_NAME] = NAME_DELETED;
+        e[OFF_LDIR_CHKSUM] = 0x12;
+
+        assert_eq!(
+            classify(&e),
+            EntryKind::Deleted {
+                was: DeletedKind::LongName { checksum: 0x12 }
+            }
+        );
+        assert_eq!(
+            NAME_DELETED & LDIR_ORD_LAST,
+            LDIR_ORD_LAST,
+            "the marker sets the last-entry flag, which is why it is not carried"
         );
     }
 
