@@ -1,5 +1,7 @@
 26c541d4b036deb75674ede096e176438532f0b1a2b2b02eee4db18c4b3d7566  ./bad-signature.img
 ba4f1f20853b3c9ceda0eae503346bf3eb4dd02f93b52a00285b785fac33cccc  ./fat32-bad-root-cluster.img
+230b8a2505a1a776776d192ed5e226db0aa9aff480cbcbf37ba0e3b40d92bce8  ./fat32-deleted-entries.img
+b6492d8750ce33412eb604c1c0c7bcacdc0aded25831310a7a60e2cbfa90eab8  ./fat32-deleted-residue.img
 c14c1dddf21dd458d3e7b60434a93b36bba1f6c36ebbd95622d822a355254fba  ./fat32-hidden-mismatch.img
 6bac910972cde75d292a1752cc399c82cfe1bc8f9c84e4b26f83d746c63a9593  ./fat32-oversized-volume.img
 7ea4a2b1491706514d13a5ce26ea194d78e48c0100133c218f5a7cf8910335f9  ./fat32-root-entries.img
