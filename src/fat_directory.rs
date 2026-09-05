@@ -628,6 +628,91 @@ pub fn recover_first_byte(surviving: &[u8; NAME_LEN - 1], checksum: u8) -> Optio
     }
 }
 
+/// What became of the first byte of a deleted short name.
+///
+/// Three outcomes, kept apart because they are different findings. A byte
+/// derived from a checksum is evidence. A byte that nothing constrains is an
+/// absence of evidence. A derivation that produced an impossible byte is
+/// evidence that the long-name set belongs to some other entry, which is a
+/// positive finding and not an absence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FirstByte {
+    /// Determined by the checksum of a preceding long-name component.
+    ///
+    /// A value of `0x05` means the character is `0xE5`, escaped as stored.
+    Recovered(u8),
+
+    /// No long-name component precedes the entry, so nothing constrains the
+    /// destroyed byte and all 254 remaining values fit the evidence equally.
+    /// ADR-0009 section 6.4.
+    Destroyed,
+
+    /// A component precedes the entry but derives a byte a live entry never
+    /// holds, which proves the set names some other short entry.
+    /// ADR-0009 section 6.2.
+    NotAssociated,
+}
+
+/// Recovers the first byte of the deleted short entry at `index`.
+///
+/// Walks backwards from `index` while each preceding entry is a deleted
+/// long-name component carrying the same checksum, then derives the byte
+/// from that checksum and the ten surviving name bytes. ADR-0009 §6.3.
+///
+/// The walk stops at any live entry. A live long-name component belongs to
+/// the live short entry that follows it, which a deleted entry is not.
+///
+/// Position is the only ordering evidence available, because deletion
+/// destroys `LDIR_Ord` on every component: `0xE5` has bit 6 set, so each one
+/// reads as ordinal 165 and as the last of its set. EXP-0003 §4.
+///
+/// Returns `None` when the entry at `index` is not a deleted short entry, in
+/// which case the question does not arise. A live entry's first byte is not
+/// destroyed, and reporting it as such would be false.
+pub fn associate(entries: &[Entry], index: usize) -> Option<FirstByte> {
+    let EntryKind::Deleted {
+        was: DeletedKind::ShortName { surviving_name, .. },
+    } = &entries.get(index)?.kind
+    else {
+        return None;
+    };
+
+    let mut checksum = None;
+    for candidate in entries[..index].iter().rev() {
+        match &candidate.kind {
+            EntryKind::Deleted {
+                was: DeletedKind::LongName { checksum: c },
+            } => match checksum {
+                None => checksum = Some(*c),
+                Some(seen) if seen == *c => {}
+                Some(_) => break,
+            },
+            _ => break,
+        }
+    }
+
+    Some(match checksum {
+        None => FirstByte::Destroyed,
+        Some(c) => match recover_first_byte(surviving_name, c) {
+            Some(byte) => FirstByte::Recovered(byte),
+            None => FirstByte::NotAssociated,
+        },
+    })
+}
+
+/// Renders a recovered short name as `STEM.EXT`.
+///
+/// `first` is the byte [`associate`] derived and `surviving` the ten bytes
+/// deletion left. Returns `None` on the same terms as any other short name:
+/// unless every byte is printable ASCII.
+pub fn recovered_name(first: u8, surviving: &[u8; NAME_LEN - 1]) -> Option<String> {
+    let mut raw = [0u8; NAME_LEN];
+    raw[0] = first;
+    raw[1..].copy_from_slice(surviving);
+
+    short_name(&raw)
+}
+
 /// Renders an 8.3 name as `STEM.EXT`.
 ///
 /// Returns `None` unless every byte is printable ASCII. Names are stored in
@@ -996,6 +1081,127 @@ mod tests {
         let sum = chksum(b"\x05ABCDEFGTXT");
 
         assert_eq!(recover_first_byte(&surviving, sum), Some(NAME_ESCAPED_E5));
+    }
+
+    /// Builds a deleted entry from a name and an attribute.
+    fn deleted(name: &[u8; NAME_LEN], attr: u8) -> Entry {
+        let mut e = entry(name, attr);
+        e[OFF_NAME] = NAME_DELETED;
+
+        Entry {
+            cluster: 2,
+            slot: 0,
+            kind: classify(&e),
+        }
+    }
+
+    /// Builds a deleted long-name component carrying `checksum`.
+    fn deleted_component(checksum: u8) -> Entry {
+        let mut e = entry(b"?          ", ATTR_LONG_NAME);
+        e[OFF_NAME] = NAME_DELETED;
+        e[OFF_LDIR_CHKSUM] = checksum;
+
+        Entry {
+            cluster: 2,
+            slot: 0,
+            kind: classify(&e),
+        }
+    }
+
+    #[test]
+    fn an_association_recovers_the_byte_the_checksum_determines() {
+        let entries = vec![
+            deleted_component(chksum(b"HELLO   TXT")),
+            deleted(b"HELLO   TXT", ATTR_ARCHIVE),
+        ];
+
+        assert_eq!(
+            associate(&entries, 1),
+            Some(FirstByte::Recovered(b'H')),
+            "the component names the entry that follows it"
+        );
+    }
+
+    #[test]
+    fn several_components_of_one_set_are_walked() {
+        let sum = chksum(b"HELLO   TXT");
+        let entries = vec![
+            deleted_component(sum),
+            deleted_component(sum),
+            deleted_component(sum),
+            deleted(b"HELLO   TXT", ATTR_ARCHIVE),
+        ];
+
+        assert_eq!(associate(&entries, 3), Some(FirstByte::Recovered(b'H')));
+    }
+
+    /// The set was consumed by slot reuse, or never existed. Nothing
+    /// constrains the byte. ADR-0009 §6.4.
+    #[test]
+    fn no_component_leaves_the_byte_destroyed() {
+        let entries = vec![
+            Entry {
+                cluster: 2,
+                slot: 0,
+                kind: classify(&entry(b"KEEP    TXT", ATTR_ARCHIVE)),
+            },
+            deleted(b"HELLO   TXT", ATTR_ARCHIVE),
+        ];
+
+        assert_eq!(associate(&entries, 1), Some(FirstByte::Destroyed));
+    }
+
+    /// A component carrying another entry's checksum derives a byte no live
+    /// entry holds, which rejects the association. ADR-0009 §6.2.
+    #[test]
+    fn a_component_of_another_set_is_rejected() {
+        let mut name = *b"HELLO   TXT";
+        name[0] = NAME_DELETED;
+        let impossible = chksum(&name);
+
+        let entries = vec![
+            deleted_component(impossible),
+            deleted(b"HELLO   TXT", ATTR_ARCHIVE),
+        ];
+
+        assert_eq!(
+            associate(&entries, 1),
+            Some(FirstByte::NotAssociated),
+            "0xE5 is never stored literally, so the set names something else"
+        );
+    }
+
+    /// A live entry's first byte is not destroyed, so the question does not
+    /// arise and no answer is offered.
+    #[test]
+    fn a_live_entry_has_no_destroyed_first_byte() {
+        let entries = vec![Entry {
+            cluster: 2,
+            slot: 0,
+            kind: classify(&entry(b"KEEP    TXT", ATTR_ARCHIVE)),
+        }];
+
+        assert_eq!(associate(&entries, 0), None);
+    }
+
+    #[test]
+    fn a_deleted_component_has_no_short_name_of_its_own() {
+        let entries = vec![deleted_component(0x12)];
+
+        assert_eq!(associate(&entries, 0), None);
+    }
+
+    #[test]
+    fn an_index_past_the_end_yields_nothing() {
+        assert_eq!(associate(&[], 0), None);
+    }
+
+    #[test]
+    fn a_recovered_name_is_rendered_with_its_implied_dot() {
+        assert_eq!(
+            recovered_name(b'H', b"ELLO   TXT"),
+            Some("HELLO.TXT".to_string())
+        );
     }
 
     #[test]

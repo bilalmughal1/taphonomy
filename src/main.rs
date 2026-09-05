@@ -8,7 +8,9 @@
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
-use taphonomy::fat_directory::{DeletedKind, Entry, EntryKind, enumerate_root};
+use taphonomy::fat_directory::{
+    DeletedKind, Entry, EntryKind, FirstByte, associate, enumerate_root, recovered_name,
+};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
@@ -233,14 +235,14 @@ fn report_root_directory(
     println!("      long name entries  {}", root.long_name_count());
     println!("      deleted entries    {}", root.deleted_count());
 
-    for entry in &root.entries {
-        print_entry(entry);
+    for (index, entry) in root.entries.iter().enumerate() {
+        print_entry(entry, &root.entries, index);
     }
 
     if !root.residue.is_empty() {
         println!("      past the terminator");
-        for entry in &root.residue {
-            print_entry(entry);
+        for (index, entry) in root.residue.iter().enumerate() {
+            print_entry(entry, &root.residue, index);
         }
     }
 
@@ -266,15 +268,19 @@ fn rendered(name: Option<&str>) -> &str {
 /// Both are printed the same way and in the same columns, because both are
 /// directory entries read from the same bytes. Which vector an entry came
 /// from is shown by the heading above it, not by its formatting.
-fn print_entry(entry: &Entry) {
+///
+/// `entries` and `index` locate the entry among its neighbours, which a
+/// deleted short entry needs: the checksum that recovers its first byte is
+/// held by the entries before it.
+fn print_entry(entry: &Entry, entries: &[Entry], index: usize) {
     let position = format!("c{} s{}", entry.cluster, entry.slot);
-    let (label, detail) = describe(&entry.kind);
+    let (label, detail) = describe(&entry.kind, entries, index);
 
     println!("      {position:<9} {label:<13} {detail}");
 }
 
 /// A label and a one-line description for one classified entry.
-fn describe(kind: &EntryKind) -> (&'static str, String) {
+fn describe(kind: &EntryKind, entries: &[Entry], index: usize) -> (&'static str, String) {
     match kind {
         EntryKind::VolumeLabel { name, .. } => {
             ("volume label", rendered(name.as_deref()).to_string())
@@ -304,7 +310,7 @@ fn describe(kind: &EntryKind) -> (&'static str, String) {
             };
             ("long name", detail)
         }
-        EntryKind::Deleted { was } => ("deleted", deleted_detail(was)),
+        EntryKind::Deleted { was } => ("deleted", deleted_detail(was, associate(entries, index))),
         EntryKind::Invalid { attr } => ("invalid", format!("attribute {attr:#04x}")),
         // The listing never contains a terminator, but the residue can: a
         // slot whose first byte is zero and whose remaining bytes are not.
@@ -314,29 +320,49 @@ fn describe(kind: &EntryKind) -> (&'static str, String) {
 
 /// What can be said about a deleted entry without inventing a name.
 ///
-/// No name is printed. The first character is destroyed, and recovering it
-/// requires associating the entry with a surviving long-name set, which this
-/// milestone does not do. ADR-0009 section 6.4 forbids substituting a guess,
-/// and the surviving bytes are in the returned structure for any caller that
-/// wants them.
-fn deleted_detail(was: &DeletedKind) -> String {
+/// A name appears only where the checksum of a surviving long-name component
+/// determined the destroyed first byte. Where nothing determined it, that is
+/// stated rather than filled in: ADR-0009 section 6.4 forbids substituting a
+/// guess, and an omitted field would read as an absence of interest rather
+/// than an absence of evidence.
+fn deleted_detail(was: &DeletedKind, first: Option<FirstByte>) -> String {
     match was {
         DeletedKind::LongName { checksum } => {
             format!("long name component, checksum {checksum:#04x}")
         }
         DeletedKind::VolumeLabel { .. } => "volume label".to_string(),
         DeletedKind::ShortName {
+            surviving_name,
             directory,
             first_cluster,
             file_size,
             ..
         } => {
-            if *directory {
+            let what = if *directory {
                 format!("directory, cluster {first_cluster}")
             } else {
                 format!("file, {file_size} bytes, cluster {first_cluster}")
-            }
+            };
+
+            format!("{what}, {}", first_byte_detail(first, surviving_name))
         }
         DeletedKind::Invalid { attr } => format!("invalid, attribute {attr:#04x}"),
+    }
+}
+
+/// How the destroyed first byte of a short name turned out.
+fn first_byte_detail(first: Option<FirstByte>, surviving: &[u8; 10]) -> String {
+    match first {
+        Some(FirstByte::Recovered(byte)) => match recovered_name(byte, surviving) {
+            Some(name) => format!("name {name} recovered"),
+            None => format!("first byte {byte:#04x} recovered, name not printable ascii"),
+        },
+        Some(FirstByte::Destroyed) => "first byte destroyed, no long name survives".to_string(),
+        Some(FirstByte::NotAssociated) => {
+            "first byte destroyed, the long name before it names another entry".to_string()
+        }
+        // Unreachable: this arm is only reached for a deleted short entry,
+        // which is exactly when `associate` answers.
+        None => "first byte destroyed".to_string(),
     }
 }
