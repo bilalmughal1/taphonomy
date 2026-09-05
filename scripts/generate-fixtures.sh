@@ -9,10 +9,11 @@
 # See docs/development/DEVELOPMENT_ENVIRONMENT.md section 11.
 #
 # Requirements:
-#   sfdisk       util-linux
-#   sgdisk       gdisk
-#   mkfs.vfat    dosfstools
-#   mcopy, mmd   mtools
+#   sfdisk                  util-linux
+#   sgdisk                  gdisk
+#   mkfs.vfat               dosfstools
+#   mcopy, mmd, mdel, mrd   mtools
+#   od, sha256sum           coreutils
 #
 # No root privileges are required. No loop devices are used. No filesystem is
 # mounted. Every image is a regular file.
@@ -55,7 +56,10 @@ require sgdisk "apt install gdisk"
 require mkfs.vfat "apt install dosfstools"
 require mcopy "apt install mtools"
 require mmd "apt install mtools"
+require mdel "apt install mtools"
+require mrd "apt install mtools"
 require sha256sum coreutils
+require od coreutils
 
 mkdir -p "$OUT_DIR"
 
@@ -92,6 +96,44 @@ poke_le32() {
     poke "$path" "$((offset+1))" "$(( (value >> 8) & 0xff ))"
     poke "$path" "$((offset+2))" "$(( (value >> 16) & 0xff ))"
     poke "$path" "$((offset+3))" "$(( (value >> 24) & 0xff ))"
+}
+
+# Byte offset of the root directory, computed from the volume's own BIOS
+# parameter block rather than assumed.
+#
+# mkfs.vfat derives FATSz32 from the volume geometry, so this offset is not a
+# constant across fixtures. A hardcoded value would poke a different structure
+# if the geometry ever changed, and the resulting image would still parse.
+#
+# od reads in host byte order, which matches FAT's little-endian layout on
+# every platform this project targets.
+root_dir_offset() {
+    local path="$1" vbr="$2"
+    local bps spc rsv nf fsz rc
+    bps=$(od -An -tu2 -j $((vbr + 11)) -N 2 "$path" | tr -d ' ')
+    spc=$(od -An -tu1 -j $((vbr + 13)) -N 1 "$path" | tr -d ' ')
+    rsv=$(od -An -tu2 -j $((vbr + 14)) -N 2 "$path" | tr -d ' ')
+    nf=$( od -An -tu1 -j $((vbr + 16)) -N 1 "$path" | tr -d ' ')
+    fsz=$(od -An -tu4 -j $((vbr + 36)) -N 4 "$path" | tr -d ' ')
+    rc=$( od -An -tu4 -j $((vbr + 44)) -N 4 "$path" | tr -d ' ')
+    printf '%d\n' $(( vbr + (rsv + nf * fsz) * bps + (rc - 2) * spc * bps ))
+}
+
+# Writes a byte only if the byte already present is the one expected.
+#
+# The four boot sector fixtures poke constant offsets and need no such check.
+# This one pokes an offset computed at run time, where a wrong offset would
+# corrupt a different structure and still produce an image that parses.
+poke_expecting() {
+    local path="$1" offset="$2" expected="$3" value="$4"
+    local current
+    current=$(od -An -tx1 -j "$offset" -N 1 "$path" | tr -d ' ')
+    if [ "$current" != "$expected" ]; then
+        printf 'error: %s offset %s holds 0x%s, expected 0x%s\n' \
+            "$path" "$offset" "$current" "$expected" >&2
+        exit 1
+    fi
+    poke "$path" "$offset" "$value"
 }
 
 # ---------------------------------------------------------------------------
@@ -478,6 +520,121 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 15. Deleted directory entries.
+#
+#     What deletion destroys and what survives was measured in EXP-0003.
+#     ADR-0009 records the decisions these two fixtures exist to test.
+# ---------------------------------------------------------------------------
+
+# Builds the volume both deleted-entry fixtures share.
+#
+# Creation order fixes slot order, and slot order is what the tests assert.
+# The resulting root directory is:
+#
+#    0  volume label
+#    1  REUSE1.TXT              live, in the slot REUSED.TXT vacated
+#    2  REUSE2.TXT              live, in a vacated long-name component slot
+#    3  deleted long-name       the surviving half of a two-entry set
+#    4  deleted PARTIA~1.TXT    first byte recoverable from slot 3's checksum
+#    5  deleted GONE            a removed subdirectory
+#    6  deleted long-name       last component, stored first
+#    7  deleted long-name       first component, adjacent to its short entry
+#    8  deleted COMPLE~1.TXT    first byte recoverable from either component
+#    9  KEEP.TXT                live, after the deleted entries
+#   10  deleted PLAIN.TXT       no long-name set; first byte unrecoverable
+#   11  terminator
+build_deleted_volume() {
+    local path="$1" label_id="$2"
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: ${label_id}
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work
+    work="$(mktemp -d)"
+
+    printf 'taphonomy reused slot fixture\n'     > "$work/reused.txt"
+    printf 'taphonomy partial set fixture\n'     > "$work/partial.txt"
+    printf 'taphonomy complete set fixture\n'    > "$work/complete.txt"
+    printf 'taphonomy surviving entry fixture\n' > "$work/keep.txt"
+    printf 'taphonomy no long name fixture\n'    > "$work/plain.txt"
+    printf 'taphonomy first reuse fixture\n'     > "$work/reuse1.txt"
+    printf 'taphonomy second reuse fixture\n'    > "$work/reuse2.txt"
+
+    local img="${path}@@${VBR_OFFSET}"
+
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/reused.txt" ::/REUSED.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/partial.txt" \
+        "::/partial long name.txt"
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/gone
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/complete.txt" \
+        "::/complete long name.txt"
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/keep.txt"  ::/KEEP.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/plain.txt" ::/PLAIN.TXT
+
+    # EXP-0003: deletion writes 0xE5 into the first byte of every entry in the
+    # set and zeroes the cluster chain in both FATs. Nothing else changes, and
+    # no data cluster is touched.
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/REUSED.TXT
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" "::/partial long name.txt"
+    MTOOLS_SKIP_CHECK=1 mrd  -i "$img" ::/gone
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" "::/complete long name.txt"
+
+    # mtools fills the earliest deleted slot first. These two consume the
+    # entry REUSED.TXT vacated and then one component of the first long-name
+    # set, leaving that set incomplete with nothing in the evidence to say so.
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/reuse1.txt" ::/REUSE1.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/reuse2.txt" ::/REUSE2.TXT
+
+    # Deleted last, so no later write reuses its slot. This is the entry whose
+    # first byte no method recovers: ADR-0009 section 6.4.
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/PLAIN.TXT
+
+    rm -rf "$work"
+}
+
+fixture_fat32_deleted_entries() {
+    local path="$OUT_DIR/fat32-deleted-entries.img"
+    printf 'fat32-deleted-entries.img\n'
+
+    build_deleted_volume "$path" 0xfa730007
+
+    note "deleted 8.3, complete and partial long-name sets, deleted directory"
+}
+
+fixture_fat32_deleted_residue() {
+    local path="$OUT_DIR/fat32-deleted-residue.img"
+    printf 'fat32-deleted-residue.img\n'
+
+    build_deleted_volume "$path" 0xfa730008
+
+    # One byte, into a slot that already held a deletion marker. Slot 5
+    # becomes the terminator, and slots 6 to 10 become residue: a complete
+    # deleted long-name set, a live entry, and a deleted 8.3 entry.
+    #
+    # ADR-0006 section 5.1 permits deliberate corruption of one field in an
+    # otherwise valid image. Every other byte was written by mkfs.vfat, mcopy,
+    # mmd, mdel and mrd. EXP-0003 established that mtools cannot produce this
+    # shape by any ordinary sequence: FAT directories do not shrink, and
+    # deleted slots are reused before the directory grows.
+    local root offset
+    root="$(root_dir_offset "$path" "$VBR_OFFSET")"
+    offset=$(( root + 5 * 32 ))
+    poke_expecting "$path" "$offset" e5 0
+
+    note "a terminator before live and deleted entries, one byte poked"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -495,6 +652,8 @@ fixture_fat32_bad_root_cluster
 fixture_fat32_undersized_fat
 fixture_fat32_root_entries
 fixture_fat32_root_multicluster
+fixture_fat32_deleted_entries
+fixture_fat32_deleted_residue
 
 # ---------------------------------------------------------------------------
 # Manifest
