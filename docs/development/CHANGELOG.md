@@ -52,9 +52,33 @@ history.
   and a directory exceeding the specification's maximum size
 - Root directory contents reported by the CLI, including the cluster chain
   and the position of every entry
+- Deleted directory entry identification (ADR-0002 M6, ADR-0009)
+- Classification of what a deleted entry was, with the fields deletion
+  destroys omitted rather than computed, so that a destroyed long-name
+  ordinal cannot be read as a valid one (ADR-0009 §3, EXP-0003 §4)
+- Recovery of a short name's destroyed first byte from the checksum a
+  surviving long-name entry carries, which determines it rather than
+  narrowing it (ADR-0007 Appendix C, ADR-0009 §6.1)
+- Rejection of a long-name association whose recovered byte is one a live
+  entry never holds, which proves the set belongs to another entry
+  (ADR-0009 §6.2)
+- Entries beyond a directory terminator classified and reported separately
+  from the allocated listing, rather than counted (ADR-0008 §5,
+  ADR-0009 §4)
+- Deleted entry count reported by the CLI alongside the short and long-name
+  counts
+- Fixtures carrying deleted 8.3 entries, a complete long-name set, a
+  partial one left by slot reuse, a removed subdirectory, and entries past
+  a terminator (ADR-0006 §5.1, ADR-0009 §8)
+- Measurement of what mtools deletion destroys and leaves, and of what a
+  fixture built with it can and cannot prove (EXP-0003)
 
 ### Changed
 
 - FAT BIOS parameter block parsing and variant determination moved from
   `filesystem.rs` into a dedicated `fat` module; `filesystem.rs` retains
   generic identification only
+- `EntryKind::Deleted` carries what the surviving bytes establish the entry
+  to have been; it previously carried nothing (ADR-0009 §3)
+- `RootDirectory` carries the classified slots beyond the terminator; the
+  observation reporting them is retained unchanged (ADR-0009 §4.4)
