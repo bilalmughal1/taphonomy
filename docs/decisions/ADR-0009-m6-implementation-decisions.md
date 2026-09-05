@@ -614,3 +614,107 @@ caught all five was the same one: read it, quote it, count it.
 
 5. Whether the CLI should report residue separately from the allocated
    listing, and in what form, is deferred to implementation.
+
+---
+
+## Appendix A: Decision D was recorded as delivered (2026-09-05)
+
+The body above is left unmodified.
+
+This ADR was accepted at `551f711` and M6 was declared complete at `894e713`.
+At that point Decision D was half implemented, and §9 already described it as
+delivered. The gap was found by a documentation audit run against `894e713`
+and closed at `898067e` and `60332eb`.
+
+Nothing in §2 changes. The decisions were right; one of them was not built.
+
+### A.1 The arithmetic shipped and its caller did not
+
+§6.1 specifies deriving the destroyed first byte from a long-name checksum.
+§6.3 specifies how the entry holding that checksum is found: walk backwards
+from the deleted short entry while each preceding entry is a deleted
+long-name component carrying the same checksum. §6.4 specifies what to report
+when no component survives.
+
+`chksum` and `recover_first_byte` were implemented at `0fbea0c`.
+`recover_first_byte` takes ten surviving name bytes and a checksum and returns
+the byte that produced it. **Nothing implemented §6.3.** No function walked
+backwards, `recover_first_byte` had no caller anywhere in `src/`, and the CLI
+printed no name for a deleted entry at all.
+
+§9 nonetheless listed among the positive consequences:
+
+> The first character of a deleted long-named file is recovered exactly where
+> the evidence permits, and reported as destroyed where it does not.
+
+At `894e713` the shipped tool did neither. It reported neither a recovered
+character nor an explicit statement that one was destroyed; it omitted the
+name field and said nothing about it.
+
+Closed at `898067e`, which added `FirstByte`, `associate` and
+`recovered_name`, and made the CLI state the outcome in every case.
+
+### A.2 The fixture test appeared to prove otherwise
+
+`a_deleted_first_byte_is_recovered_from_its_long_name_set`, added at
+`20044c2`, passed throughout. It read:
+
+```rust
+for (component, short, expected) in [(3, 4, b'P'), (7, 8, b'C')] {
+```
+
+The slot pairs were read from a manual decode of the fixture image and
+written into the test. The test performed the association itself and then
+checked that the arithmetic agreed. It could not have failed for the reason
+§6.3 exists, because it never asked any code to find a component.
+
+A test that supplies the answer it is checking proves the last step of a
+derivation and hides the absence of every step before it.
+
+Replaced at `60332eb` with a version that calls `associate` over every index
+in the enumeration and asserts that the resulting set of names is exactly
+`PARTIA~1.TXT` and `COMPLE~1.TXT`, in on-disk order. It is given the
+enumeration and nothing else. Two further tests were added: one asserting the
+three outcomes of §6.2 and §6.4 against the fixture, and one asserting that
+association works on the residue vector, where the slice indices and the slot
+numbers differ.
+
+### A.3 Cause
+
+The quality gates were treated as the completeness check.
+
+`cargo fmt`, `cargo clippy -D warnings` and `cargo test --workspace` were run
+after every change in the milestone and were green every time. They prove
+that what exists compiles, is idiomatic, and passes its tests. **They cannot
+detect a specified function that was never written**, because nothing calls
+it and nothing tests it. An absent capability produces no warning.
+
+The milestone was built as a sequence of briefs, each implementing part of
+the ADR, in the order `CLAUDE.md` §44 requires: research, decision,
+implementation, tests, documentation. Each step was verified against its own
+brief. No step compared the finished tree against the ADR's list of
+decisions.
+
+§11.6 named the shape of the errors made while preparing this decision: a
+claim formed from something that resembled the source rather than the source
+itself. This is a variant. The claim that the milestone was complete was
+formed from a sequence of green results that resembled completeness.
+
+The measure that would have caught it, and which was eventually what did:
+read the ADR's own §2 and check each decision against the code by name.
+
+### A.4 An error in the correction
+
+The brief that replaced the hand-association stated that
+`recover_first_byte` was no longer named by
+`tests/fat32_directory_fixtures.rs`, and removed it from the import list on
+that basis. A third test still called it. The build broke.
+
+The file had been read in full that session and was available to search. It
+was not searched. This is §11.2 and §11.3 again, and it is recorded here
+because it happened while correcting §11.6's own diagnosis.
+
+The resolution is in the file rather than in the import: the third test was
+performing the same hand-association, which
+`association_works_past_the_terminator` now covers properly, so the block was
+removed rather than the import restored.
