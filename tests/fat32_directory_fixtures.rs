@@ -17,14 +17,16 @@
 use std::path::{Path, PathBuf};
 
 use taphonomy::EvidenceFile;
-use taphonomy::fat_directory::{EntryKind, enumerate_root};
+use taphonomy::fat_directory::{
+    DeletedKind, DirectoryObservation, EntryKind, enumerate_root, recover_first_byte,
+};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{VBR_SIZE, VolumeExtent};
 use taphonomy::partition::{PartitionTable, SECTOR_SIZE, parse_mbr};
 
-/// Cluster size of both fixtures, in directory entries.
+/// Cluster size of every fixture used here, in directory entries.
 ///
-/// Both are formatted at one 512-byte sector per cluster, so a cluster holds
+/// All are formatted at one 512-byte sector per cluster, so a cluster holds
 /// sixteen 32-byte entries. Measured with
 /// `od -An -tu1 -j 1048589 -N 1 fixtures/partition/fat32-root-entries.img`.
 const SLOTS_PER_CLUSTER: usize = 16;
@@ -366,4 +368,205 @@ fn enumeration_is_deterministic() {
     let second = enumerate_root(&mut evidence, &boot, extent).expect("second enumeration");
 
     assert_eq!(first, second);
+}
+
+/// Every deleted shape `fat32-deleted-entries.img` was built to carry.
+///
+/// Slot order is fixed by the order `mcopy`, `mdel` and `mrd` are invoked in
+/// `scripts/generate-fixtures.sh`, which is why these are asserted
+/// positionally.
+#[test]
+fn every_deleted_shape_in_the_fixture_is_classified() {
+    let (mut evidence, boot, extent) = open_volume("fat32-deleted-entries.img");
+    let root = enumerate_root(&mut evidence, &boot, extent).expect("enumerating");
+
+    assert_eq!(
+        root.entries.len(),
+        11,
+        "eleven slots are used, and the terminator is not an entry: {:?}",
+        root.entries
+    );
+
+    let deleted = root
+        .entries
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::Deleted { .. }))
+        .count();
+
+    assert_eq!(
+        deleted, 7,
+        "three long-name components and four short entries were deleted"
+    );
+
+    let EntryKind::Deleted {
+        was:
+            DeletedKind::ShortName {
+                surviving_name,
+                directory,
+                first_cluster,
+                file_size,
+                ..
+            },
+    } = &root.entries[4].kind
+    else {
+        panic!(
+            "slot 4 must be a deleted file, got {:?}",
+            root.entries[4].kind
+        );
+    };
+
+    assert_eq!(
+        surviving_name, b"ARTIA~1TXT",
+        "ten bytes survive, not eleven"
+    );
+    assert!(!*directory);
+    assert_eq!(*first_cluster, 4);
+    assert_eq!(*file_size, 30);
+
+    let EntryKind::Deleted {
+        was:
+            DeletedKind::ShortName {
+                surviving_name,
+                directory,
+                first_cluster,
+                nt_res,
+                ..
+            },
+    } = &root.entries[5].kind
+    else {
+        panic!(
+            "slot 5 must be a deleted directory, got {:?}",
+            root.entries[5].kind
+        );
+    };
+
+    assert_eq!(
+        surviving_name, b"ONE       ",
+        "the directory was named gone"
+    );
+    assert!(*directory, "mrd removed a subdirectory, not a file");
+    assert_eq!(*first_cluster, 5);
+    assert_eq!(*nt_res, 0x08, "created as ::/gone, lowercase stem");
+}
+
+/// The destroyed byte is determined by the checksum, not narrowed by it.
+///
+/// Both sets recover the byte `mtools` wrote before `mdel` overwrote it:
+/// `PARTIA~1.TXT` and `COMPLE~1.TXT`. ADR-0009 section 6.1.
+#[test]
+fn a_deleted_first_byte_is_recovered_from_its_long_name_set() {
+    let (mut evidence, boot, extent) = open_volume("fat32-deleted-entries.img");
+    let root = enumerate_root(&mut evidence, &boot, extent).expect("enumerating");
+
+    for (component, short, expected) in [(3, 4, b'P'), (7, 8, b'C')] {
+        let EntryKind::Deleted {
+            was: DeletedKind::LongName { checksum },
+        } = &root.entries[component].kind
+        else {
+            panic!("slot {component} must be a deleted long-name component");
+        };
+
+        let EntryKind::Deleted {
+            was: DeletedKind::ShortName { surviving_name, .. },
+        } = &root.entries[short].kind
+        else {
+            panic!("slot {short} must be a deleted short entry");
+        };
+
+        assert_eq!(
+            recover_first_byte(surviving_name, *checksum),
+            Some(expected),
+            "recovering slot {short} from the checksum in slot {component}"
+        );
+    }
+}
+
+/// Slot reuse consumed one component of the first set and neither of the
+/// second. Nothing in the evidence says so: the ordinals that counted the
+/// components are destroyed, so only position distinguishes them.
+/// ADR-0009 section 5.3.
+#[test]
+fn a_partial_long_name_set_looks_like_a_complete_one() {
+    let (mut evidence, boot, extent) = open_volume("fat32-deleted-entries.img");
+    let root = enumerate_root(&mut evidence, &boot, extent).expect("enumerating");
+
+    let components = |mut slot: usize| {
+        let mut n = 0;
+        while slot > 0 {
+            slot -= 1;
+            if !matches!(
+                root.entries[slot].kind,
+                EntryKind::Deleted {
+                    was: DeletedKind::LongName { .. }
+                }
+            ) {
+                break;
+            }
+            n += 1;
+        }
+        n
+    };
+
+    assert_eq!(components(4), 1, "one component survived reuse");
+    assert_eq!(components(8), 2, "both components survived");
+
+    assert!(
+        matches!(root.entries[2].kind, EntryKind::ShortName { .. }),
+        "a live entry occupies the slot the missing component held"
+    );
+}
+
+/// Slot 10's first byte cannot be recovered by any method in this milestone.
+/// The entry before it is live, so no long-name set belongs to it and no
+/// checksum constrains the destroyed byte. It is reported as deleted and no
+/// name is offered. ADR-0009 section 6.4.
+#[test]
+fn a_deleted_entry_without_a_long_name_set_offers_no_first_byte() {
+    let (mut evidence, boot, extent) = open_volume("fat32-deleted-entries.img");
+    let root = enumerate_root(&mut evidence, &boot, extent).expect("enumerating");
+
+    assert!(
+        matches!(root.entries[9].kind, EntryKind::ShortName { .. }),
+        "the entry before slot 10 is live, so slot 10 has no set"
+    );
+
+    let EntryKind::Deleted {
+        was: DeletedKind::ShortName { surviving_name, .. },
+    } = &root.entries[10].kind
+    else {
+        panic!("slot 10 must be a deleted short entry");
+    };
+
+    assert_eq!(surviving_name, b"LAIN   TXT");
+}
+
+/// The residue fixture stops at a terminator that a poked byte created, and
+/// reports the entries beyond it rather than discarding them.
+///
+/// Those entries are not yet listed. Making them addressable is ADR-0009
+/// Decision B, which is not implemented here.
+#[test]
+fn the_residue_fixture_ends_early_and_reports_what_follows() {
+    let (mut evidence, boot, extent) = open_volume("fat32-deleted-residue.img");
+    let root = enumerate_root(&mut evidence, &boot, extent).expect("enumerating");
+
+    assert_eq!(
+        root.entries.len(),
+        5,
+        "the listing ends at the poked terminator in slot 5"
+    );
+
+    // Slot 5 is that terminator, and its own remaining bytes survive: it held
+    // a deleted directory entry before one byte was set to zero. They are
+    // neither listed nor counted, because the terminator branch consumes the
+    // slot before the residue branch sees it.
+    assert_eq!(
+        root.observations,
+        vec![DirectoryObservation::ContentAfterTerminator {
+            cluster: 2,
+            first_slot: 6,
+            slots: 5,
+        }],
+        "five slots past the terminator still hold entries"
+    );
 }
