@@ -935,6 +935,12 @@ The validator determines whether the evidence supports a stronger claim.
 
 This separation is fundamental to preventing false-positive recovery.
 
+`docs/decisions/ADR-0003-recovery-confidence-model.md` section 3.1 defines
+this Candidate/Artifact boundary as the pipeline it names. A Candidate
+carries no confidence level because it has not been assessed; an Artifact
+carries exactly one. The distinction drawn here is that pipeline boundary
+and is not itself a confidence classification.
+
 ---
 
 # 37. Observability

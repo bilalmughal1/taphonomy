@@ -212,14 +212,13 @@ Network communication must not be required for core recovery functionality.
 
 ### 6.9 Explicit Uncertainty
 
-Taphonomy must distinguish between:
+Taphonomy must distinguish what it verified from what it inferred, and must
+never present the second as the first.
 
-* verified recovery
-* probable recovery
-* partial recovery
-* reconstructed data
-* unverified extraction
-* unrecoverable evidence
+The levels this distinction uses, and the evidence each requires, are
+defined in `docs/decisions/ADR-0003-recovery-confidence-model.md`. The
+six-term list this section previously held predated that ADR and is removed
+rather than restated here, so that the levels have one definition.
 
 ---
 

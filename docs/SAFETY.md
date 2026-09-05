@@ -318,22 +318,21 @@ A partially recovered file must not be presented as a complete verified file.
 
 # 14. Recovery Confidence
 
-Taphonomy should eventually classify recovery results.
+Taphonomy classifies recovery results. The model is defined in
+`docs/decisions/ADR-0003-recovery-confidence-model.md`, which is the single
+source of the levels, of what each requires as evidence, and of what may
+carry one.
 
-Initial conceptual categories:
+The candidate list this section previously held predated that ADR and did
+not match it. It is removed rather than corrected: a taxonomy repeated in
+several documents drifts, which is what happened here.
 
-```text
-VERIFIED
-HIGH_CONFIDENCE
-PARTIAL
-RECONSTRUCTED
-UNVERIFIED
-UNRECOVERABLE
-```
+Confidence must be based on measurable evidence rather than subjective
+language.
 
-The exact confidence model will be defined separately before implementation.
-
-Confidence must be based on measurable evidence rather than subjective language.
+Confidence classifies a recovered artifact. It does not classify an
+operation, and it does not classify a structural finding such as the
+identification of a deleted directory entry. ADR-0003 section 5.
 
 ---
 
