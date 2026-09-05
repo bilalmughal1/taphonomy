@@ -440,6 +440,62 @@ pub fn classify(entry: &[u8; ENTRY_BYTES]) -> EntryKind {
     }
 }
 
+/// The checksum a long-name entry carries for its short name.
+///
+/// Computed over all eleven bytes of the short name as stored, so the
+/// escaped form of a leading `0xE5` is checksummed as `0x05` and not as the
+/// character it stands for.
+///
+/// Performs no I/O and cannot fail, for the reason given on [`classify`].
+pub fn chksum(name: &[u8; NAME_LEN]) -> u8 {
+    let mut sum = 0u8;
+    for byte in name {
+        sum = ((sum & 1) << 7).wrapping_add(sum >> 1).wrapping_add(*byte);
+    }
+    sum
+}
+
+/// Recovers the first byte of a short name that deletion destroyed.
+///
+/// `surviving` is bytes 1 to 10 of the name field, and `checksum` is the
+/// byte a long-name entry of the same set carries. Each round of [`chksum`]
+/// is a rotation followed by an addition modulo 256, both of which are
+/// bijections, and the first byte enters as the initial accumulator value, so
+/// exactly one candidate reproduces any given checksum.
+///
+/// That argument is not relied upon. All 256 candidates are tried and the
+/// result is returned only if exactly one matched, so a checksum function
+/// that was not bijective would yield `None` rather than an arbitrary byte.
+///
+/// Returns `None` when the recovered byte is one a live entry never holds:
+/// `0x00` marks the end of the directory and `0xE5` is never stored
+/// literally, being escaped to `0x05`. Either outcome is proof that the
+/// long-name set does not belong to this short entry, so the association is
+/// rejected rather than reported. ADR-0009 section 6.2.
+///
+/// A returned `0x05` means the recovered character is `0xE5`.
+pub fn recover_first_byte(surviving: &[u8; NAME_LEN - 1], checksum: u8) -> Option<u8> {
+    let mut name = [0u8; NAME_LEN];
+    name[1..].copy_from_slice(surviving);
+
+    let mut found = None;
+    for candidate in 0..=u8::MAX {
+        name[0] = candidate;
+        if chksum(&name) != checksum {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(candidate);
+    }
+
+    match found {
+        Some(NAME_TERMINATOR) | Some(NAME_DELETED) => None,
+        other => other,
+    }
+}
+
 /// Renders an 8.3 name as `STEM.EXT`.
 ///
 /// Returns `None` unless every byte is printable ASCII. Names are stored in
@@ -722,6 +778,77 @@ mod tests {
             EntryKind::Deleted,
             "a deleted long-name entry is deleted, not a long name"
         );
+    }
+
+    /// Measured against real volumes rather than derived from the
+    /// specification alone. `ANNUAL~1.TXT` is the long-named file in
+    /// `fat32-root-entries.img`, whose long-name entries `mtools` stamped
+    /// with `0xD8`. The other two are the deleted files in
+    /// `fat32-deleted-entries.img`, stamped `0xF0` and `0x12`.
+    #[test]
+    fn the_checksum_matches_what_mtools_wrote() {
+        assert_eq!(chksum(b"ANNUAL~1TXT"), 0xD8);
+        assert_eq!(chksum(b"PARTIA~1TXT"), 0xF0);
+        assert_eq!(chksum(b"COMPLE~1TXT"), 0x12);
+    }
+
+    #[test]
+    fn every_first_byte_produces_a_distinct_checksum() {
+        let mut seen = [false; 256];
+        let mut name = *b"?ARTIA~1TXT";
+
+        for candidate in 0..=u8::MAX {
+            name[0] = candidate;
+            let sum = chksum(&name) as usize;
+            assert!(!seen[sum], "checksum {sum:#04x} produced twice");
+            seen[sum] = true;
+        }
+    }
+
+    #[test]
+    fn a_destroyed_first_byte_is_recovered_exactly() {
+        for name in [b"PARTIA~1TXT", b"COMPLE~1TXT", b"HELLO   TXT"] {
+            let sum = chksum(name);
+            let mut surviving = [0u8; NAME_LEN - 1];
+            surviving.copy_from_slice(&name[1..]);
+
+            assert_eq!(
+                recover_first_byte(&surviving, sum),
+                Some(name[0]),
+                "recovering the first byte of {name:?}"
+            );
+        }
+    }
+
+    /// A recovered `0x00` would mean the entry ended the directory, which a
+    /// live entry never did. The checksum belongs to some other short name.
+    #[test]
+    fn a_recovered_terminator_rejects_the_association() {
+        let surviving = *b"ARTIA~1TXT";
+        let sum = chksum(b"\x00ARTIA~1TXT");
+
+        assert_eq!(recover_first_byte(&surviving, sum), None);
+    }
+
+    /// A recovered `0xE5` would mean the byte was stored literally, which it
+    /// never is: a leading `0xE5` is escaped to `0x05`.
+    #[test]
+    fn a_recovered_delete_marker_rejects_the_association() {
+        let surviving = *b"ARTIA~1TXT";
+        let sum = chksum(b"\xe5ARTIA~1TXT");
+
+        assert_eq!(recover_first_byte(&surviving, sum), None);
+    }
+
+    /// The escape is checksummed as stored. A name whose first character is
+    /// `0xE5` is stored with `0x05`, so `0x05` is what the recovery returns
+    /// and the caller maps it back.
+    #[test]
+    fn an_escaped_lead_byte_recovers_as_the_escape() {
+        let surviving = *b"ABCDEFGTXT";
+        let sum = chksum(b"\x05ABCDEFGTXT");
+
+        assert_eq!(recover_first_byte(&surviving, sum), Some(NAME_ESCAPED_E5));
     }
 
     #[test]
