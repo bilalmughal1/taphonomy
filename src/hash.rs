@@ -75,6 +75,62 @@ pub struct HashResult {
     pub bytes_read: u64,
 }
 
+/// An incremental SHA-256 computation.
+///
+/// Bytes are supplied in as many pieces as the caller has them, and the
+/// digest and the byte count come out together. A caller streaming evidence
+/// it cannot hold in memory uses this; a caller holding a reader uses
+/// [`hash_reader`], which is written over it.
+///
+/// The byte count is kept here rather than by the caller, so the number of
+/// bytes reported can only ever be the number of bytes hashed.
+///
+/// ADR-0004 section 5 conditions 1 and 2: `sha2` is named in this module and
+/// nowhere else, and none of its types appears in this one's signatures.
+pub struct Sha256Hasher {
+    inner: Sha256,
+    bytes_read: u64,
+}
+
+impl Sha256Hasher {
+    /// Starts a computation over no bytes.
+    pub fn new() -> Self {
+        Self {
+            inner: Sha256::new(),
+            bytes_read: 0,
+        }
+    }
+
+    /// Adds `bytes` to the computation.
+    ///
+    /// How the input is divided across calls does not affect the result.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.inner.update(bytes);
+        self.bytes_read = self
+            .bytes_read
+            .checked_add(bytes.len() as u64)
+            .expect("byte count cannot exceed u64::MAX");
+    }
+
+    /// Finishes the computation, returning the digest and the byte count.
+    pub fn finish(self) -> HashResult {
+        let output = self.inner.finalize();
+        let mut digest = [0u8; DIGEST_LEN];
+        digest.copy_from_slice(&output);
+
+        HashResult {
+            digest: Sha256Digest(digest),
+            bytes_read: self.bytes_read,
+        }
+    }
+}
+
+impl Default for Sha256Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Computes the SHA-256 digest of everything the reader yields.
 ///
 /// Reads in fixed-size chunks. Memory use does not scale with input size.
@@ -83,9 +139,8 @@ pub struct HashResult {
 /// because the number of bytes that were actually read is the number the
 /// digest covers. A short read is not silently treated as a full one.
 pub fn hash_reader<R: Read>(reader: &mut R) -> io::Result<HashResult> {
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut buffer = [0u8; BUFFER_LEN];
-    let mut bytes_read: u64 = 0;
 
     loop {
         let n = match reader.read(&mut buffer) {
@@ -96,19 +151,9 @@ pub fn hash_reader<R: Read>(reader: &mut R) -> io::Result<HashResult> {
         };
 
         hasher.update(&buffer[..n]);
-        bytes_read = bytes_read
-            .checked_add(n as u64)
-            .expect("byte count cannot exceed u64::MAX");
     }
 
-    let output = hasher.finalize();
-    let mut digest = [0u8; DIGEST_LEN];
-    digest.copy_from_slice(&output);
-
-    Ok(HashResult {
-        digest: Sha256Digest(digest),
-        bytes_read,
-    })
+    Ok(hasher.finish())
 }
 
 #[cfg(test)]
@@ -136,5 +181,40 @@ mod tests {
         let mut input: &[u8] = &data;
         let result = hash_reader(&mut input).expect("hashing multi-chunk input");
         assert_eq!(result.bytes_read, data.len() as u64);
+    }
+
+    /// Dividing the input differently must not change the result.
+    ///
+    /// This compares two call patterns through one implementation, so it
+    /// establishes that `update` accumulates correctly and does not
+    /// establish that the digest is SHA-256. `tests/nist_vectors.rs` does
+    /// that, and does it through this type now that `hash_reader` is written
+    /// over it.
+    #[test]
+    fn many_small_updates_match_one_pass() {
+        let data = vec![0x5au8; BUFFER_LEN + 1234];
+
+        let mut whole: &[u8] = &data;
+        let expected = hash_reader(&mut whole).expect("hashing in one pass");
+
+        let mut hasher = Sha256Hasher::new();
+        for piece in data.chunks(7) {
+            hasher.update(piece);
+        }
+
+        assert_eq!(hasher.finish(), expected);
+    }
+
+    /// A hasher given nothing is a computation over zero bytes, not an
+    /// error. The digest is the published value for the empty input.
+    #[test]
+    fn a_hasher_given_nothing_yields_the_empty_digest() {
+        let result = Sha256Hasher::new().finish();
+
+        assert_eq!(result.bytes_read, 0);
+        assert_eq!(
+            result.digest.to_hex(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }
