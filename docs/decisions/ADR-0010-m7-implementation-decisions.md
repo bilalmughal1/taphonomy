@@ -1,0 +1,578 @@
+# ADR-0010: M7 Implementation Decisions
+
+* **Status:** Proposed
+* **Date:** 2026-09-06
+* **Decision owners:** Taphonomy project
+* **Scope:** Whether M7 writes recovered content to a path; whether extraction
+  is performed by default; how the absence of a cluster chain is handled;
+  which deleted entries are eligible; the bounds on an extraction; where the
+  code lives; the fixtures required before M7 may claim to recover a file
+* **Related:** ADR-0001 §11 (superseded); ADR-0002 §8 (M7, M8, M9), §1.1;
+  ADR-0003 §3.1, §3.2, §4.2, §4.4, §8; ADR-0004 §5 conditions 1, 2, 5;
+  ADR-0006 §5.1; ADR-0008 §8.1; ADR-0009 §2, Appendix A;
+  `ARCHITECTURE.md` §18; `PROJECT.md` §5; `SAFETY.md` §7, §15, §16;
+  `SECURITY.md` §7, §16, §18; EXP-0003
+
+---
+
+## 1. Context
+
+`ADR-0002` §8 defines M7 as "Recover the data of an unfragmented deleted
+file." M8 is "Validate recovered data against a known-good reference" and M9
+is "Classify and report the result with a confidence level." Every boundary
+below is drawn from those three lines.
+
+M6 is complete. `enumerate_root` classifies every entry in the root
+directory, `EntryKind::Deleted` carries a `DeletedKind` payload, and a deleted
+short name's destroyed first byte is derived where a long-name entry survives
+to determine it. No code in the crate reads a data cluster, and no code in the
+crate writes to a path.
+
+M7 is the first milestone that acts on the location a directory entry names
+rather than on the entry itself.
+
+### 1.1 Basis
+
+Every decision below rests on one of four things, and each is named where it
+is used.
+
+**Measurement.** EXP-0003 measured what `mtools` deletion destroys. A
+fixture audit run on 2026-09-06 measured what the two existing deleted
+fixtures contain, cluster by cluster and FAT entry by FAT entry, with every
+number carrying the `od` command that produced it.
+
+**Code read at `9bbc625`.** Line references are to that commit.
+
+**The project's own documents, quoted.** In particular `ADR-0003` §3.1 and
+§8, which had not been read in full before this decision and which contradict
+the framing this milestone was handed.
+
+**External sources, named.** M7 is the first milestone whose behaviour the
+FAT32 specification does not define. §3.1 records why that matters and what
+was consulted instead.
+
+---
+
+## 2. Decisions
+
+**A.** M7 writes no file. It extracts to memory, hashes what it extracted,
+and reports.
+
+**B.** Extraction is opt-in. The default output reports only what the volume
+states.
+
+**C.** Contiguity is never affirmed. The implied run is checked against the
+active FAT, and any allocated cluster in it refuses the recovery.
+
+**D.** Eligibility is narrow, and every refusal is named rather than omitted.
+
+**E.** The extraction is streamed and bounded. Nothing allocates
+`DIR_FileSize`. Slack is excluded from the content and from the digest, and
+its extent is reported.
+
+**F.** `hash.rs` gains a project-owned incremental hasher, and `hash_reader`
+is rewritten over it.
+
+**G.** M7 is a new module. `cluster_offset` and `read_fat_entry` become
+`pub(crate)` and neither moves.
+
+**H.** Three cases must be covered by fixtures, in one new image pair.
+
+---
+
+## 3. Decision A: M7 writes no file
+
+### 3.1 The milestone does not ask for it
+
+`ADR-0002` §8's M7 line is five words long and none of them is "write". The
+only milestone list in the project's history that contained a write step is
+`ADR-0001` §11, whose item 7 reads "write recovered data to a separate
+destination". `ADR-0002` §7 marks §11 **Superseded**.
+
+A fixture audit of `docs/` on 2026-09-06 found no other passage assigning an
+output step to M7. What it found instead was requirements on output, in
+`SAFETY.md` §3.3, §4.3, §7, §15 and §16, in `SECURITY.md` §7, §8, §18
+and §19, and in `ARCHITECTURE.md` §18, none of which is assigned to a
+milestone.
+
+### 3.2 `ADR-0003` §3.1 forbids it as things stand
+
+> A Candidate must never be presented to a user as a recovered file, written
+> to the recovery output directory, or counted in a recovery result summary.
+
+M7 has no validator. M8 is the validator. Everything M7 produces is therefore
+a Candidate in `ADR-0003` §3.1's sense, and writing it to a recovery output
+directory is forbidden without amending an accepted ADR.
+
+Note that `ADR-0003` §8 says the confidence taxonomy "becomes binding on the
+first code that assigns a confidence level, which under ADR-0002 §8 is
+milestone M9", and that implementing it earlier "would be speculative". Both
+statements are correct and they are about §3.2. The constraint that binds M7
+is §3.1's pipeline boundary, which is not a confidence classification and
+does not wait for M9.
+
+### 3.3 Writing is a component, not a call
+
+`ARCHITECTURE.md` §18 specifies an Output Writer enforcing destination
+boundaries, path safety, overwrite protection, output integrity and metadata
+recording. The audit at `9bbc625` found none of it: no output directory, no
+destination argument, no file-creation helper anywhere in `src/`. The only
+filesystem writes in the tree are test scaffolding in `tests/read_only.rs`.
+
+Building that alongside the recovery algorithm makes one milestone into two.
+
+### 3.4 The reference implementation makes the same split
+
+The Sleuth Kit's `icat` writes recovered content to standard output; the
+caller redirects it. TSK is the library and the command-line tools, and
+Autopsy is the layer above that provides case management. Extraction and
+output are separated there, in the same place `ARCHITECTURE.md` §18 separates
+them.
+
+### 3.5 The write side is where the defect was
+
+CVE-2026-40024, disclosed against The Sleuth Kit through 4.14.0, is a path
+traversal in `tsk_recover`: a crafted filesystem image containing path
+traversal sequences in filenames causes files to be written outside the
+intended recovery directory.
+
+This is `SECURITY.md` §7 exactly, and it occurred in the most examined
+open-source forensic toolkit there is. It occurred in the component that
+writes. `icat`, which extracts, has no such surface.
+
+M7 additionally derives part of a filename rather than reading it:
+`ADR-0009` Decision D recovers a deleted short name's first character from a
+checksum. `SECURITY.md` §18 requires that output filenames be treated as
+untrusted input. A partly derived filename, written by an unbuilt writer,
+before any validator exists, is three unfinished things meeting at once, and
+nothing requires them to meet at M7.
+
+### 3.6 What is given up
+
+A digest of bytes the user cannot obtain is less useful than a file. M7 ends
+with the tool able to demonstrate that it read the right bytes and unable to
+hand them over. That is a real cost and it is accepted deliberately: M7 is the
+algorithm and the Output Writer is the delivery.
+
+This decision does not hold that a recovery tool should never write.
+`tsk_recover` exists because bulk extraction is useful. The decision is about
+sequence.
+
+---
+
+## 4. Decision B: extraction is opt-in
+
+Without an explicit request, the CLI reports what the volume states about a
+deleted entry: its surviving fields, its first cluster, its size, and the
+allocation status of the run those imply. With the request, it additionally
+reads the run and reports the digest.
+
+Two reasons.
+
+**The guess stays behind an explicit act.** TSK reached the same
+arrangement: without its recovery flag, `icat` returns only the first
+cluster, because the first cluster is stated on disk and everything after it
+is inferred. That is `ADR-0003`'s Candidate boundary expressed at the
+interface.
+
+**Cost.** The default enumeration is bounded by the size of the directory.
+Reading every deleted file's run is bounded by the size of the data those
+entries name, which on a real volume is unbounded in practice.
+
+`src/main.rs:28` currently rejects a second argument. This decision changes
+that and nothing else about argument handling.
+
+---
+
+## 5. Decision C: contiguity is never affirmed
+
+### 5.1 The evidence that is missing
+
+Deletion zeroes the cluster chain in every FAT. EXP-0003 measured it: of
+thirty changed bytes, twenty-four were three FAT entries in each of two FATs.
+
+For an unfragmented file the chain is not needed, because the clusters follow
+the first. But **nothing in the evidence says the file was unfragmented.**
+The entry that would have said so is the entry deletion destroyed.
+
+### 5.2 The three available behaviours
+
+There is no specification for this. Brian Carrier, documenting his own
+implementation, states that the process "is not defined by any 'official'
+specification" and that there is no "generally accepted" and documented
+procedure for FAT file recovery. The FAT32 specification documents structure
+and is silent on deletion, as EXP-0003 already recorded.
+
+Three behaviours are documented in practice:
+
+1. **Skip.** TSK advances by consecutive clusters, counts unallocated ones
+   towards the file, and skips allocated ones. This reconstructs a fragmented
+   file, which `ADR-0002` §8 places explicitly out of scope for M7.
+2. **Ignore.** Other tools take the number of clusters the size requires and
+   disregard allocation status. Carrier names this strategy and publishes the
+   incorrect digests it produces against his test corpus, alongside the
+   correct ones.
+3. **Refuse.** Neither of the above.
+
+M7 refuses.
+
+### 5.3 The check
+
+For an eligible entry, the implied run is
+
+```text
+first_cluster ..= first_cluster + file_size.div_ceil(cluster_bytes) - 1
+```
+
+Every cluster in the run is looked up in the active FAT. A zero entry is
+unallocated. Any non-zero entry means the cluster is claimed by something
+else, so the implied run is broken and the bytes at that offset are not this
+file's. The recovery is refused, and the first offending cluster is named.
+
+Carrier refuses on the starting cluster for a reason worth recording,
+because it is not the reason above: an allocated starting cluster also occurs
+when a file was moved within the same partition, in which case another
+directory entry describes the same clusters with a better size. This decision
+refuses that case too, and now does so knowingly.
+
+### 5.4 The check can only refuse
+
+A run of unallocated entries is the **absence of contrary evidence**, not
+evidence. Clusters can be written and freed again, leaving the FAT zero and
+the content foreign.
+
+`ADR-0003` §4.2 states that a level "may only be raised by evidence that
+satisfies the higher level's requirement" and "may never be raised by absence
+of contrary evidence." A free run therefore never raises anything. It is a
+necessary condition for the extraction to be attempted and not a sufficient
+one for the result to be believed, and M7's report must say so in those
+terms.
+
+This is where `ADR-0003` first constrains real output, and it is §4.2 and
+§3.1 that do it, not §3.2.
+
+---
+
+## 6. Decision D: eligibility is narrow and refusals are named
+
+Eligible: `DeletedKind::ShortName` with `directory == false`,
+`file_size > 0`, and `first_cluster >= FIRST_DATA_CLUSTER`
+(`src/fat.rs:48`), with the implied run falling inside the volume's declared
+cluster count.
+
+Refused by name, never by omission:
+
+* a deleted directory, which M7 does not recover
+* a deleted volume label
+* a deleted long-name component
+* `DeletedKind::Invalid`
+* `file_size == 0`, which locates no content
+* `first_cluster` of 0 or 1, which are reserved
+* a run extending beyond the declared cluster count
+
+An omitted field reads as an absence of interest rather than an absence of
+evidence. `ADR-0009` §3.3 made this argument about a name and it applies
+unchanged to a recovery.
+
+**The first cluster itself is unverified.** `KNOWN_ISSUES.md` records that no
+fixture can exercise a deleted file whose first-cluster high word has been
+zeroed, and EXP-0003 Limitation 2 states that the experiment measures
+`mtools` and cannot measure a Microsoft implementation. A `first_cluster`
+below 65,536 read from a deleted entry is indistinguishable from one whose
+high word was destroyed. M7 reports this once rather than implying otherwise
+by silence.
+
+---
+
+## 7. Decision E: the extraction is streamed, bounded, and excludes slack
+
+### 7.1 Nothing allocates `DIR_FileSize`
+
+`DIR_FileSize` is untrusted evidence and `SECURITY.md` §16 names "enormous
+declared file sizes" as a resource-exhaustion vector. The extraction reads one
+cluster at a time into a reusable buffer, exactly as `enumerate_root` does at
+`src/fat_directory.rs:861`.
+
+`src/evidence.rs:94` applies no bounds check of its own; an over-read fails
+through `read_exact`'s `UnexpectedEof`. That fails the read but only after an
+oversized allocation would already have been made, if one were made. The run
+is therefore range-checked against the declared cluster count before any read,
+in the same shape as `src/fat_directory.rs:844-849`.
+
+### 7.2 Slack is excluded and reported
+
+The final cluster is read whole and truncated to the remaining byte count. The
+bytes past the logical end are the previous occupant's, not this file's, and
+they appear in neither the extraction nor the digest.
+
+They are not discarded silently. File slack is a recognised artefact in its
+own right, so its extent is reported. Recovering it is a separate capability
+and is not M7.
+
+---
+
+## 8. Decision F: `hash.rs` gains an incremental hasher
+
+`src/hash.rs:85` exposes `hash_reader<R: Read>` and nothing else. Decisions A
+and E together require hashing a cluster-by-cluster stream without holding it,
+and there is no surface for that.
+
+The alternative considered was a `Read` adapter over the cluster run, feeding
+the existing `hash_reader` unchanged. It is rejected: the adapter would have
+to launder a typed error through `io::Error`, and `src/error.rs:3` states the
+principle it would break, that "a recovery failure that does not identify what
+failed is not diagnosable."
+
+A project-owned incremental type satisfies `ADR-0004` §5 conditions 1 and 2 in
+the same way `Sha256Digest` does: `sha2` is named only inside `hash.rs` and no
+caller sees its types.
+
+Blast radius, measured at `9bbc625`. `hash_reader` has six call sites: one in
+production at `src/evidence.rs:87`, two unit tests, and three in
+`tests/nist_vectors.rs`. Rewriting `hash_reader` over the new type leaves
+every signature unchanged, so no call site changes. `ADR-0004` §5 condition 5
+is preserved, and `chunk_boundary_does_not_affect_digest` already drip-feeds a
+reader, so the incremental path is covered by NIST vectors on the day it
+lands.
+
+---
+
+## 9. Decision G: a new module, and two helpers become `pub(crate)`
+
+M7 is a new module in `src/`. `src/fat_directory.rs` is 1,865 lines and
+enumeration is a different concern from extraction.
+
+The module needs `cluster_offset` (`src/fat_directory.rs:764-777`) and
+`read_fat_entry` (`src/fat_directory.rs:969-980`). Both are private. Both
+become `pub(crate)`.
+
+Neither moves. `read_fat_entry` reads the FAT and is arguably misplaced in the
+directory module, but moving it edits a path M5's tests cover for a gain that
+is organisational rather than measured. The misplacement is recorded in
+`KNOWN_ISSUES.md` instead.
+
+M7's unit tests get their own in-memory `EvidenceReader`. The existing
+`MemoryImage` is declared inside `src/fat_directory.rs`'s `#[cfg(test)]`
+module at 1455-1467, is nameable nowhere else, and its helpers are
+directory-shaped: `write_cluster` zero-fills unused 32-byte slots, which is not
+what a data cluster is. Promoting it to shared test support is the wrong trade
+for two users; a third user is the trigger.
+
+No name collisions exist: `recover`, `recovery`, `run`, `extraction`,
+`candidate` and `artifact` are declared as no module, type, function or
+constant anywhere in `src/` at `9bbc625`.
+
+---
+
+## 10. Decision H: three cases, one new image pair
+
+### 10.1 What the existing fixtures prove, measured
+
+`fat32-deleted-entries.img` was decoded on 2026-09-06. Three deleted entries
+qualify for M7, in slots 4, 8 and 10, at clusters 4, 6 and 8, with sizes 30,
+31 and 31 bytes. The volume is formatted at one 512-byte sector per cluster.
+
+For all three, the FAT entry reads `0x00000000` and the cluster still holds the
+exact bytes the generator wrote.
+
+So M7 would succeed on three files out of three; every run is one cluster
+long, so no run is walked; nothing has been reallocated, so Decision C's
+refusal could be deleted from the source without a test failing.
+
+This is `ADR-0008` §8.1's "proves versus illustrates" problem in its fourth
+instance, and it is now a measurement rather than a concern.
+
+### 10.2 What `mtools` will not produce
+
+`mtools` allocates forward. Measured: after four deletions freeing clusters 3,
+4, 5 and 6, the next two files written took clusters 9 and 10.
+
+A fixture built with `mtools` alone therefore cannot contain a deleted entry
+whose clusters have been reused, which is the ordinary condition on any volume
+that has been used since the deletion.
+
+### 10.3 The three cases
+
+1. **A multi-cluster deleted file with an intact free run.** Proves the run
+   is walked and the content assembled across cluster boundaries. `mtools`
+   alone.
+2. **A deleted entry whose implied run collides with live clusters.** Proves
+   Decision C's refusal fires. Requires a poke.
+3. **A deleted directory.** Proves Decision D's refusal fires. Already
+   available in the existing fixtures and reproduced in the new volume.
+
+### 10.4 The poke, and the one rejected
+
+`ADR-0006` §5.1 permits it: "Taking a valid image and poking one field, as the
+four FAT32 boot sector fixtures already do, does not encode a reading of the
+specification — the surrounding structure came from `mkfs.vfat`."
+
+The field poked is a deleted entry's `DIR_FileSize`, enlarged so that the run
+it implies extends into clusters that live files hold. One field, on an image
+`mkfs.vfat` and `mtools` built, producing the shape a reused volume produces.
+
+Rejected alternative: poking a FAT entry inside the run from zero to an
+allocated value. Also one field, but it manufactures a cluster allocated to
+no directory entry, which is a different condition, a lost cluster, and it
+would test the refusal against a volume state that does not match the story
+the fixture is telling.
+
+### 10.5 A new pair, not an edit to the existing one
+
+`tests/fat32_directory_fixtures.rs` asserts entry positions and justifies that
+by the order `mcopy` and `mmd` are invoked. Adding a file to
+`build_deleted_volume` would move every slot index in those assertions and
+change both existing manifest digests. A new builder and a new image pair
+leave M6's fixtures untouched.
+
+### 10.6 A recommendation withdrawn
+
+It was proposed during preparation that the fixture record, alongside the true
+content digest, the digest a naive contiguous read would produce, following
+Carrier's practice of publishing both.
+
+Withdrawn. That practice guards against a tool silently returning the wrong
+content. Under Decision C the tool refuses instead of returning anything, so a
+test asserting the refusal already fails if the refusal is removed. The second
+digest would add a value to maintain and detect nothing the first assertion
+does not.
+
+The practice becomes relevant again if Decision C is ever revisited in favour
+of the ignore-status strategy.
+
+---
+
+## 11. Consequences
+
+### Positive
+
+The first milestone that reads file content adds no code that writes to a
+path, so the class of defect CVE-2026-40024 represents cannot be introduced by
+it.
+
+The absence of a cluster chain is handled by refusing rather than by
+assuming, and the refusal is grounded in a measurement of the FAT rather than
+in a claim about what deletion usually leaves.
+
+`ADR-0003`'s pipeline boundary becomes load-bearing for the first time, at
+§3.1 and §4.2, ahead of the taxonomy becoming binding at M9.
+
+The extraction is bounded before any read, so a hostile `DIR_FileSize`
+allocates nothing.
+
+Deleted files gain fixture coverage for a run, a collision and a directory,
+none of which the existing set contains.
+
+### Negative
+
+M7 produces no artefact a user can open. The milestone's visible output is a
+run, a status and a digest.
+
+`hash.rs` changes, which is the first edit to the module `ADR-0004` isolated.
+The signature does not change and the NIST vectors cover it, but the module was
+previously untouched since M1.
+
+A second in-memory `EvidenceReader` enters the test suite, duplicating part of
+`MemoryImage`.
+
+Two helpers widen from private to `pub(crate)`, and one of them stays in a
+module it does not belong to.
+
+`src/lib.rs:11-14`, `README.md:9-11`, `README.md:250`, `README.md:253-254` and
+`PROJECT.md:345-348` all assert in the present tense that no file content is
+read and no recovery capability exists. Every one becomes false and must
+change in the same commit series. `ADR-0009:365-366` says the same and is
+corrected by appendix rather than edited, under the rule that an ADR is dated
+evidence.
+
+The collision fixture depends on a poked field, so it proves the refusal
+handles the structure and not that the structure arises in the field. The
+measured `mtools` allocation behaviour is why no alternative exists here.
+
+---
+
+## 12. Review trigger
+
+Revisit Decision A when the Output Writer of `ARCHITECTURE.md` §18 is built,
+which is M9 at the earliest, and record the exception to `ADR-0003` §3.1 that
+writing a Candidate would require if it is ever proposed before then.
+
+Revisit Decision C if fragmented recovery is brought into scope, which
+`ADR-0002` §8 currently excludes. The skip strategy becomes available at that
+point and this decision's refusal does not.
+
+Revisit Decision G if a third module needs an in-memory `EvidenceReader`, or
+if a second module needs `read_fat_entry`, at which point moving it out of
+`fat_directory.rs` becomes a measured gain rather than an organisational
+preference.
+
+Revisit Decision H if a fixture built from a Windows-deleted volume becomes
+available, which would also close the high-word gap `KNOWN_ISSUES.md` records.
+
+---
+
+## 13. Errors in the preparation of this decision
+
+### 13.1 A claim formed from a filename
+
+It was predicted that the single-cluster FAT read M7 needs already existed in
+`src/fat.rs`, on the reasoning that M5 walks a cluster chain and `fat.rs` is
+the FAT module.
+
+`src/fat.rs` contains no FAT-table access at all. It is BIOS parameter block
+parsing and variant determination, and its own module doc comment says so in
+its first line. The read is `read_fat_entry` in `src/fat_directory.rs`.
+
+The prediction was formed from the file's name rather than from its contents,
+which is `ADR-0009` §11.6's shape again: a claim formed from something that
+resembled the source.
+
+### 13.2 A precondition written from an assumption about a file's contents
+
+An audit brief instructed that `sha256sum -c` be run against
+`fixtures/partition/MANIFEST.sha256` from the repository root. The manifest
+records relative paths, so the command fails there and must be run from the
+manifest's own directory.
+
+The line was written from an assumption about how the manifest was structured.
+The manifest was available to read and was not read. This is the rule that new
+briefs must be written from current file contents, applied to a file the brief
+itself was about to verify.
+
+### 13.3 An expectation formed without being stated
+
+Before the fixture audit ran, an unstated expectation was held that the two
+deleted fixture images differed by more than the single poked byte. They differ
+by exactly one byte, and the FAT tables and data clusters are byte-identical.
+
+The expectation cost nothing because it was never acted on, and it is recorded
+because it was formed from a general sense that a poke has knock-on effects
+rather than from the script, which pokes one byte and says so.
+
+---
+
+## 14. Open after this decision
+
+1. **Cluster 3 of `fat32-deleted-entries.img` is unmeasured.** `REUSED.TXT`
+   was the first file written and its directory slot was later taken by
+   `REUSE1.TXT`, so if its content survives, the fixture contains a file that
+   no directory entry names and that entry-driven recovery can never reach.
+   That cluster 3 is the one is an inference from the write order, not a
+   measurement, and the claim is deliberately not made in this ADR.
+
+2. **No FAT32 reference corpus has been identified for M8.** Carrier's
+   published FAT undelete test image documents both correct and incorrect
+   digests for six deleted files, but it is a 6 MB volume, which cannot be
+   FAT32 under the cluster-count threshold at `src/fat.rs:38`. Whether a
+   FAT32 equivalent exists is unresearched, and its licence would need
+   examining before use.
+
+3. **The zeroed first-cluster high word remains untestable**, unchanged from
+   `KNOWN_ISSUES.md`. Decision D reports the first cluster as unverified
+   because of it.
+
+4. **`ADR-0007` §5.5's patent question remains open.** M7 does not decode long
+   names, so the gate is not reached.
+
+5. **Deleted entries in subdirectories remain out of scope**, because M5
+   enumerates the root directory only.
