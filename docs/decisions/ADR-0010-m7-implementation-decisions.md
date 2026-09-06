@@ -872,7 +872,7 @@ pub enum Ineligible {
     InvalidEntry { attr: u8 },
     EmptyFile,
     ReservedFirstCluster { cluster: u32 },
-    RunOutOfRange { last_cluster: u32, cluster_count: u32 },
+    RunOutOfRange { last_cluster: u64, data_clusters: u32 },
 }
 
 pub struct ClusterRun {
@@ -966,8 +966,10 @@ mod tests` and is used by `src/fat_directory.rs:1544` and by
 lives in the module that owns the concept. `MemoryImage` implements
 `EvidenceReader`, and `EvidenceReader` is declared in `evidence.rs`.
 
-`write_cluster` and `write_fat` become free helper functions in the test
-module that uses them. `write_fat` is three lines of FAT32 entry arithmetic
+`write_cluster` and `write_fat` stay as methods, in an inherent `impl
+MemoryImage` block in the test module that uses them. An inherent impl may
+live in any module of the crate that defines the type, so all 38 existing
+call sites are unchanged. `write_fat` is three lines of FAT32 entry arithmetic
 and will exist in two test modules. That duplication is deliberate: the
 alternative puts the size of a FAT32 entry into `evidence.rs`, which knows
 nothing about filesystems and should continue not to.
