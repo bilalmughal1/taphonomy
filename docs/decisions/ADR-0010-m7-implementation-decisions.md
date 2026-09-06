@@ -890,3 +890,98 @@ pub struct Extraction {
     pub slack_bytes: u32,
 }
 ```
+
+---
+
+## Appendix C: Decision G is amended on the in-memory reader (2026-09-06)
+
+Decision G (§9) ruled that M7's unit tests get their own in-memory
+`EvidenceReader` and that promoting the existing `MemoryImage` to shared test
+support was "the wrong trade for two users; a third user is the trigger."
+
+That ruling is amended. The reader is promoted now, before the second copy is
+written. The rest of Decision G stands: the module is new, `cluster_offset`
+and `read_fat_entry` widen to `pub(crate)`, and neither moves.
+
+### C.1 The estimate the decision rested on was wrong
+
+Decision G was written on an estimate of about fifteen duplicated lines.
+
+Measured: the `MemoryImage` block in `src/fat_directory.rs` runs 71 lines, of
+which `write_cluster` is 13. The recovery module wants the other 58. A
+further 21 lines of geometry constants, `extent()` and `boot()` were already
+duplicated into `src/fat_recovery.rs` at `6a49d94`. The second copy would
+therefore stand at roughly 83 lines rather than fifteen.
+
+### C.2 The criterion the decision used was the weaker one
+
+Decision G applied a count: two users is not enough, three is. That
+heuristic exists because with two similar pieces of code it is not yet known
+whether they are the same thing or merely look alike, and abstracting on a
+resemblance produces something worse than the duplication.
+
+The count is a proxy. The question it stands in for is whether the two uses
+are the same concept, and where that question can be answered directly the
+proxy is not needed.
+
+It can be answered directly here, and it answers differently for the two
+halves of the block:
+
+**The reader is one concept and cannot diverge.** The struct, `new`, `write`
+and the `EvidenceReader` impl exist to satisfy a trait with a single method,
+`read_exact_at`, declared at `src/evidence.rs:123-126`. Both users need byte
+regions read at an offset, and both need a read past the end to fail rather
+than pad, which `src/fat_directory.rs:1460-1463` records as the reason the
+double is shaped this way: a double that padded would let tests pass against
+behaviour `EvidenceFile` does not have. There is no future in which one
+module needs that to mean something different from the other.
+
+**`write_cluster` is not.** It zero-fills 32-byte slots because directory
+entries are 32 bytes. It is domain-shaped, it is exactly what acquires a
+parameter and then a flag when it is shared, and it does not move.
+
+Decision G's own objection to promotion was that "its helpers are
+directory-shaped". That objection was correct and it applies to 13 of the 71
+lines. It was applied to all of them.
+
+### C.3 The trigger Decision G named could not have fired
+
+Decision G said a third user is the trigger. A third unit-test user is
+unlikely to arrive: the extraction work is in the same module and so is the
+same user, and the fixture tests live in `tests/`, where each file compiles
+as its own crate and cannot see a `#[cfg(test)]` item in `src` at all.
+
+A trigger that cannot fire is not a deferral. It is a decision to duplicate
+permanently, which is not what Decision G was weighing.
+
+### C.4 Where the reader goes
+
+Into `src/evidence.rs`, in a `#[cfg(test)] pub(crate) mod tests` added for
+the purpose, as `pub(crate) struct MemoryImage`.
+
+Not into a new support module. The crate already shares a test helper across
+modules: `fat32_sector()` lives in `src/fat.rs`'s `#[cfg(test)] pub(crate)
+mod tests` and is used by `src/fat_directory.rs:1544` and by
+`src/fat_recovery.rs`. The established practice is that a shared test helper
+lives in the module that owns the concept. `MemoryImage` implements
+`EvidenceReader`, and `EvidenceReader` is declared in `evidence.rs`.
+
+`write_cluster` and `write_fat` become free helper functions in the test
+module that uses them. `write_fat` is three lines of FAT32 entry arithmetic
+and will exist in two test modules. That duplication is deliberate: the
+alternative puts the size of a FAT32 entry into `evidence.rs`, which knows
+nothing about filesystems and should continue not to.
+
+### C.5 Consequences
+
+The move edits the `#[cfg(test)]` block that M5's and M6's unit tests run
+through. Nothing outside `#[cfg(test)]` changes, and the gates cover it: if
+the move is wrong, those tests fail rather than something subtler happening.
+
+`src/evidence.rs` gains its first `#[cfg(test)]` module. Its tests otherwise
+live in `tests/read_only.rs`, which stays where it is, because it tests the
+real type against the real filesystem and is not affected.
+
+The count criterion is not abandoned. It remains the right default where the
+question it proxies for cannot be answered directly. It was the wrong tool
+for a 45-line implementation of a one-method trait.
