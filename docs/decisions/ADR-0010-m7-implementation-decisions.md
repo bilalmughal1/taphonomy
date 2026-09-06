@@ -576,3 +576,84 @@ rather than from the script, which pokes one byte and says so.
 
 5. **Deleted entries in subdirectories remain out of scope**, because M5
    enumerates the root directory only.
+
+---
+
+## Appendix A: Two factual errors in §10.1 and §11 (2026-09-06)
+
+The body above is left unmodified. Neither error changes a decision. §2's
+decisions A to H stand unaltered.
+
+Both errors were present when this ADR was committed at `34de009` and were
+found the same day, by checking two claims against the sentences they were
+drawn from rather than against the lists they had been taken from.
+
+### A.1 §10.1 gives the wrong ordinal
+
+§10.1 states:
+
+> This is `ADR-0008` §8.1's "proves versus illustrates" problem in its fourth
+> instance, and it is now a measurement rather than a concern.
+
+**It is the third instance, not the fourth.** The repository records two
+prior instances and no more:
+
+* `ADR-0008` §8.1, "The fixture set contains no chain-walk coverage", which
+  is the first and where the phrasing originates.
+* `EXPERIMENTS.md:515`, in EXP-0003, which names itself: "That is the 'what a
+  fixture proves versus what it illustrates' problem recorded in ADR-0008
+  §8.1, in its second instance."
+
+No third instance is recorded anywhere in the tree. The fixture trap §10
+addresses is therefore the third.
+
+The ordinal was written from a recollection rather than from a count, and no
+source was consulted before it was recorded. A number that is not counted is
+not a measurement.
+
+### A.2 §11 wrongly lists `ADR-0009` among the statements M7 falsifies
+
+§11's Negative section states:
+
+> `src/lib.rs:11-14`, `README.md:9-11`, `README.md:250`, `README.md:253-254`
+> and `PROJECT.md:345-348` all assert in the present tense that no file
+> content is read and no recovery capability exists. Every one becomes false
+> and must change in the same commit series. `ADR-0009:365-366` says the same
+> and is corrected by appendix rather than edited, under the rule that an ADR
+> is dated evidence.
+
+**The final sentence is wrong.** `ADR-0009:365-366` reads:
+
+> M6 runs no recovery algorithm and produces no content. A deleted directory
+> entry is not an Artifact, and ADR-0003 §5 forbids merging the two axes it
+> distinguishes.
+
+That statement is scoped to M6. M7 running a recovery algorithm does not make
+it false, and it requires no appendix and no change of any kind.
+
+The five statements named before it are unscoped assertions about the tool as
+a whole, and those five do become false. The list is correct up to the point
+where `ADR-0009` is introduced.
+
+### A.3 Cause
+
+Both errors share the shape recorded in §13 of this ADR and in `ADR-0009`
+§11.6: a claim formed from something that resembled the source rather than
+from the source.
+
+A.2 came from a list. A prior audit had returned every passage in the
+repository matching a search for statements about recovery and file content,
+and had explicitly noted that some hits were included because they matched
+the search rather than because they asserted what was searched for.
+`ADR-0009:365-366` was one of those. Membership in the list was treated as
+equivalent to the claim the list was gathered to support, and the sentence
+itself was not re-read for its scope. The audit was correct and complete; it
+was used carelessly.
+
+A.1 came from a recollection. The ordinal was carried from a document read
+earlier and then altered without reference to anything.
+
+The general form: a list assembled for one question does not answer a
+narrower question drawn from it, and every member has to be checked against
+the narrower question individually. A search result is a candidate, not a
+finding.
