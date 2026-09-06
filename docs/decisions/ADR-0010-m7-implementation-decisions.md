@@ -657,3 +657,236 @@ The general form: a list assembled for one question does not answer a
 narrower question drawn from it, and every member has to be checked against
 the narrower question individually. A search result is a candidate, not a
 finding.
+
+---
+
+## Appendix B: Interface decisions for the recovery module (2026-09-06)
+
+This appendix adds decisions. The three appendices written in this project
+before it corrected facts, and nothing in `CLAUDE.md` §22 restricts an
+appendix to that use. The choice to record these here rather than in a
+separate ADR is deliberate: §2's decisions A to H and this appendix's B1 to
+B7 are both M7's, and the rule that a milestone is not complete until its
+ADR's decisions are checked by name points at one document. Two documents
+would mean two checklists and only one of them would be checked.
+
+Decisions here are numbered B1 to B7 so that a reference to "Decision D"
+continues to mean §2's Decision D and nothing else.
+
+These decisions determine the shape of the interface. They do not alter any
+decision in §2, and each of them is downstream of one.
+
+### B.0 Basis
+
+Line references are to `ef15a1b`, and every one of them was confirmed by
+reading the line at that number rather than by recollection.
+
+An earlier draft of this appendix stated that exactly two public structs in
+the crate have a private field. The count was three. The draft was written
+after `Sha256Hasher` was added at `ef15a1b` and did not account for it. The
+rule B5 records was not affected; only the count was wrong.
+
+### B1. The module is `src/fat_recovery.rs`
+
+Named for the structures it reads, matching `src/fat_directory.rs`. The
+module reads FAT32 FAT entries and FAT32 directory entries specifically, so
+the `fat` prefix is accurate rather than decorative, and a later recovery
+module for another filesystem does not collide with it.
+
+Rejected: `src/recovery.rs`, which would claim generality the module does not
+have.
+
+### B2. `assess` returns `Result<Option<Assessment>, RecoveryError>`
+
+`None` means the entry is not a deleted file, so the question does not
+arise.
+
+This follows `associate` at `src/fat_directory.rs:672`, whose doc comment
+already settled the same question for M6:
+
+> Returns `None` when the entry at `index` is not a deleted short entry, in
+> which case the question does not arise. A live entry's first byte is not
+> destroyed, and reporting it as such would be false.
+
+The alternative was an `Ineligible::NotADeletedFile` variant sitting
+alongside genuine refusals. It was rejected because it makes every live entry
+in a directory produce a refusal reason that the caller must remember to
+suppress, and a reason that must be suppressed is a reason that will
+eventually be printed.
+
+`assess` takes `&Entry` rather than a pre-filtered payload, so that every
+eligibility rule lives in one function. Splitting them between the caller and
+the module is how a rule gets applied in one place and forgotten in the
+other.
+
+### B3. Ineligibility is an outcome, not an error
+
+`Ineligible` travels in the `Ok` arm. A deleted directory, an empty file, or
+a reserved first cluster is a fact about the evidence, not a failure of the
+tool.
+
+The crate already draws this line in a type. `ParseOutcome`
+(`src/partition.rs:228-233`) returns `table`, "what the sector was found to
+contain", alongside `anomalies`, "interpretable but unusual observations".
+Something unusual about the evidence is reported in the success value; only
+a failure to parse at all becomes an error. `Assessment` follows the same
+shape.
+
+`RecoveryError` is reserved for what stops the assessment from being made at
+all: a read that fails, an offset that overflows, a cluster outside the data
+region.
+
+Decision D (§6) requires that refusals are named rather than omitted. A
+refusal that arrives as an error is named, but it is named in the same
+channel as a broken image, and the caller cannot tell a fact about the
+evidence from a fault in reading it.
+
+### B4. `UnallocatedRun` is a witness type
+
+`extract` takes `&UnallocatedRun`. The type has a private field, is
+constructible only within the module, and is produced only by `assess` after
+every FAT entry in the implied run has read zero. There is therefore no way
+to write a call that extracts a run the FAT says is in use, because there is
+no way to obtain the argument.
+
+This is Decision C (§5) enforced by the compiler rather than by discipline.
+Decision C is the substance of the milestone, and a refusal that a later
+caller can bypass by accident is a refusal that will eventually be bypassed.
+
+The pattern is not new to this crate. Three public structs declared outside
+`#[cfg(test)]` have a field that is not public, and all three exist to carry
+an invariant:
+
+* `EvidenceFile` (`src/evidence.rs:19-23`), whose existence proves that a
+  read-only open succeeded. Its doc: the handle "is opened without write,
+  append, create, or truncate access" and "there is no method on this type
+  that writes."
+* `Sha256Digest` (`src/hash.rs:30`), whose existence proves 32 bytes came
+  out of a computation.
+* `Sha256Hasher` (`src/hash.rs:90-93`), whose private `bytes_read` is why
+  the count it reports can only be the number of bytes it hashed.
+
+Every other public struct in `src/` has every field public: `FatGeometry`,
+`Fat32BootSector`, `HashResult`, `Entry`, `RootDirectory`, `MbrPartition`
+and `ParseOutcome`.
+
+`UnallocatedRun` is the fourth of the first kind, and the same shape as all
+three: an abstract newtype whose constructor is the only way in.
+
+**No escape hatch.** `Sha256Digest::from_bytes` exists and is labelled with
+what it does not do. `UnallocatedRun` gets no equivalent. Unit tests obtain
+one by calling `assess` against a memory image holding a real FAT, which
+costs more setup than fabricating one and is the point: a test that
+manufactures the precondition it is testing under supplies its own answer,
+which is what Appendix A.2 of `ADR-0009` records.
+
+A read-only accessor returning `&ClusterRun` is provided, because the caller
+must report the run and read access cannot weaken the invariant. No mutable
+access and no consuming conversion are provided. Nothing needs either, and
+adding them before anything does is the escape hatch by another name.
+
+### B5. `ClusterRun` is a report with public fields
+
+`ClusterRun` carries the first cluster, the cluster count, the file size and
+the slack byte count, all public.
+
+This follows a rule that holds across every struct in `src/` and is written
+down nowhere: **private fields where a type carries an invariant, public
+fields where a type reports what was found.** Seven public structs report and
+have every field public: `FatGeometry`, `Fat32BootSector`, `HashResult`,
+`Entry`, `RootDirectory`, `MbrPartition`, `ParseOutcome`. Three carry an
+invariant and do not: `EvidenceFile`, `Sha256Digest`, `Sha256Hasher`.
+
+The rule is recorded here because it is real, it has been followed
+consistently, and a contributor who has to infer it is a contributor who will
+eventually infer it wrongly.
+
+### B6. `RecoveryError` carries a `DirectoryError` variant
+
+`cluster_offset` (`src/fat_directory.rs:764`) and `read_fat_entry`
+(`src/fat_directory.rs:969`) both return `Result<_, DirectoryError>`.
+Decision G (§9) keeps them where they are, so the recovery module's error
+type must carry their errors, and those errors are FAT-level failures wearing
+a directory-level name: `OffsetOverflow`, `ClusterOutOfRange`, `BadCluster`.
+
+This is recorded so that it reads as a consequence rather than as
+carelessness, and so that the `KNOWN_ISSUES.md` entry Decision G requires
+says what the misplacement actually costs. It is not a reason to reopen
+Decision G: moving the helpers would edit a path M5's tests cover for an
+organisational gain.
+
+### B7. The active FAT index is derived inside the module
+
+The module computes the index from `BPB_ExtFlags` itself. It is not a
+parameter.
+
+`src/fat_directory.rs:831` does exactly this:
+
+```text
+let fat_index = boot.active_fat().unwrap_or(0);
+```
+
+`active_fat` (`src/fat32.rs:207-217`) returns `None` when mirroring is
+enabled, "because then every FAT is current and the active-FAT bits carry no
+meaning", and otherwise masks bits 0 to 3 of `ext_flags`, which
+`src/fat32.rs:178` documents as the raw `BPB_ExtFlags`. The `unwrap_or(0)` is
+therefore not a fallback for a missing answer: when mirroring is on, FAT 0 is
+as current as any other.
+
+A recovery that read FAT 0 on a volume where FAT 1 is authoritative would
+report allocation status confidently and wrongly, and Decision C (§5) rests
+entirely on that status being right. Making the index a parameter would let a
+caller supply the wrong one.
+
+**The test cannot use a fixture.** `src/fat_directory.rs:1656-1659` records
+why: `KNOWN_ISSUES.md` notes that no fixture exercises FAT mirroring, because
+`mkfs.vfat` offers no option to set `BPB_ExtFlags` and writes both FATs
+identically. M5's test at `:1661` therefore builds a synthetic boot sector
+through a `boot(ext_flags)` helper at `:1538` and reads it with the in-memory
+`MemoryImage`. M7's equivalent test does the same, with its own helper and
+its own in-memory reader, per Decision G (§9).
+
+### B.8 Shape
+
+The following is the interface these decisions describe. It records the
+shape, not the source; where the two ever differ, the source is what exists
+and this is what was intended.
+
+```text
+pub fn assess(entry, boot, extent, reader)
+    -> Result<Option<Assessment>, RecoveryError>
+
+pub fn extract(run: &UnallocatedRun, boot, extent, reader)
+    -> Result<Extraction, RecoveryError>
+
+pub enum Assessment {
+    Ineligible(Ineligible),
+    RunBroken { run: ClusterRun, first_allocated: u32 },
+    Recoverable(UnallocatedRun),
+}
+
+pub enum Ineligible {
+    Directory,
+    VolumeLabel,
+    LongNameComponent,
+    InvalidEntry { attr: u8 },
+    EmptyFile,
+    ReservedFirstCluster { cluster: u32 },
+    RunOutOfRange { last_cluster: u32, cluster_count: u32 },
+}
+
+pub struct ClusterRun {
+    pub first_cluster: u32,
+    pub cluster_count: u32,
+    pub file_size: u32,
+    pub slack_bytes: u32,
+}
+
+pub struct UnallocatedRun(ClusterRun);
+
+pub struct Extraction {
+    pub digest: Sha256Digest,
+    pub bytes_hashed: u64,
+    pub slack_bytes: u32,
+}
+```
