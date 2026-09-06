@@ -23,6 +23,7 @@ pub mod evidence;
 pub mod fat;
 pub mod fat32;
 pub mod fat_directory;
+pub mod fat_recovery;
 pub mod filesystem;
 pub mod hash;
 pub mod partition;
