@@ -343,13 +343,14 @@ A Taphonomy feature is complete only when:
 ## 11. Current Status
 
 Taphonomy has a validated read-only evidence layer, a FAT32 boot sector
-parser, and a FAT32 root directory reader that identifies deleted
-entries. No recovery capability is implemented: nothing reads file
-content.
+parser, a FAT32 root directory reader that identifies deleted entries,
+and recovery of the data of an unfragmented deleted file. Recovery
+extracts to memory and reports a digest; no file is written, and the
+result carries no confidence level.
 
-Milestones M1 to M6 of ADR-0002 section 8 are complete. The next
-engineering objective is M7, recovering the data of an unfragmented
-deleted file.
+Milestones M1 to M7 of ADR-0002 section 8 are complete. The next
+engineering objective is M8, validating recovered data against a
+known-good reference.
 
 The technology stack is selected and recorded in ADR-0001. The safety
 and development contracts this section previously described as pending

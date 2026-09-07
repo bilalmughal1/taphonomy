@@ -6,23 +6,34 @@ The project is designed around evidence preservation, correctness, security, rep
 
 ## Project Status
 
-Taphonomy has a validated read-only evidence layer and reads FAT32 root
-directories. No recovery capability is implemented yet: nothing reads file
-content.
+Taphonomy has a validated read-only evidence layer, reads FAT32 root
+directories, and recovers the data of an unfragmented deleted file.
+Recovered content is extracted to memory and reported as a SHA-256 digest.
+No file is written.
 
-Milestones M1 to M6 of ADR-0002 §8 are complete: evidence images are
+Milestones M1 to M7 of ADR-0002 §8 are complete: evidence images are
 opened read-only and hashed, MBR partition tables are parsed with every
 declared extent validated against the true evidence size, GPT is detected
 and reported as unsupported, filesystems are identified from volume
 structure, FAT32 boot sectors are parsed and validated against the
 partition extent they occupy, the root directory is enumerated by walking
-its cluster chain, and the deleted entries within it are identified.
+its cluster chain, the deleted entries within it are identified, and the
+content of an eligible deleted file is read and hashed.
 
 A deleted entry is reported with whatever fields deletion left intact.
 Where a long-name entry survives alongside it, the first character of its
 short name is recovered from the checksum that entry carries, which
 determines the destroyed byte rather than narrowing it. Where none
 survives, that is reported rather than guessed.
+
+Deletion zeroes the cluster chain in every FAT, so nothing in the evidence
+says a deleted file was unfragmented. Taphonomy computes the run the entry
+implies, reads every cluster of that run in the active FAT, and refuses the
+recovery where any of them is in use, naming the cluster that caused the
+refusal. A run of free clusters means only that nothing has claimed those
+clusters since the deletion, which is not evidence that the content there
+is the file's, and the tool says so rather than leaving it to be inferred.
+Reading the content requires `--recover`.
 
 The initial development sequence is:
 
@@ -247,11 +258,14 @@ docs/decisions/
 
 At this stage:
 
-* no recovery capability is implemented
+* recovered content is reported as a digest and is not written to a file
 * only FAT32 is parsed beyond the partition table; exFAT and NTFS are
   identified and reported as unsupported
 * FAT32 support stops at the root directory; subdirectories are not read
-* no file content is read
+* only an unfragmented deleted file is recovered; a run reaching an
+  allocated cluster is refused rather than reconstructed
+* recovered content is not validated against a known-good reference and
+  carries no confidence level
 * the long name of a deleted entry is not decoded; only its short name is
   recovered, and only where a long-name entry survives to determine it
 * only MBR partition tables are parsed; GPT is detected but not parsed

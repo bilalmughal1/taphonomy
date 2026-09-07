@@ -65,3 +65,29 @@ zeroed high word is untested against evidence a formatting tool wrote.
 
 `mdel`, `mrd` and `mdeltree` determinism is measured and is no longer an
 open issue; EXP-0003 records it.
+
+---
+
+## FAT-level helpers live in the directory module
+
+`cluster_offset` computes a data cluster's byte offset and `read_fat_entry`
+reads one entry from the file allocation table. Neither is about
+directories. Both are declared in `src/fat_directory.rs`, where M5 put them
+because it was the only caller.
+
+M7 added `src/fat_recovery.rs` as a second caller, so both widened to
+`pub(crate)`. ADR-0010 section 9 decided against moving them: the move
+would edit a path M5's and M6's tests cover, for an organisational gain
+rather than a measured one.
+
+The cost shows in the error type. `RecoveryError::Directory` carries a
+`DirectoryError`, and the variants reaching the recovery module through
+that path are `OffsetOverflow`, `ClusterOutOfRange` and `BadCluster`. None
+of those is a directory failure, so a reader of a recovery error is told
+the wrong thing about where it happened. ADR-0010 Appendix B6 records the
+same trade.
+
+The fix is to move both into `src/fat.rs`, which is BIOS parameter block
+parsing and variant determination and today holds no FAT-table access at
+all. The trigger is a third caller, or any change that touches
+`fat_directory.rs`'s FAT handling for another reason.

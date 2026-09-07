@@ -72,6 +72,28 @@ history.
   a terminator (ADR-0006 §5.1, ADR-0009 §8)
 - Measurement of what mtools deletion destroys and leaves, and of what a
   fixture built with it can and cannot prove (EXP-0003)
+- Recovery of the data of an unfragmented deleted file in the FAT32 root
+  directory, extracted to memory and reported as a digest with the number
+  of bytes it covers (ADR-0002 M7, ADR-0010)
+- Refusal of a recovery whose implied cluster run reaches a cluster the
+  active FAT reports as in use, naming the cluster that caused it
+  (ADR-0010 §5)
+- Eligibility reported as named refusals rather than silence, covering a
+  deleted directory, a volume label, a long-name component, the invalid
+  attribute pair, a zero size, a reserved first cluster, and a run
+  extending past the last data cluster (ADR-0010 §6)
+- Extraction streamed one cluster at a time, so memory does not scale with
+  a size read from evidence; file slack is read, excluded from the digest,
+  and its size reported (ADR-0010 §7)
+- A project-owned incremental SHA-256 hasher, with `hash_reader` written
+  over it so one implementation does the hashing (ADR-0010 §8)
+- `--recover`, placing the reading of a deleted file's content behind an
+  explicit request; without it the implied run and its allocation status
+  are reported and no content is read (ADR-0010 §4)
+- Fixtures carrying a four-cluster deleted file with its run intact, a
+  single-cluster deleted file, a deleted directory, and a poked size whose
+  implied run reaches a cluster a live file holds (ADR-0006 §5.1,
+  ADR-0010 §10)
 
 ### Changed
 
@@ -82,3 +104,8 @@ history.
   to have been; it previously carried nothing (ADR-0009 §3)
 - `RootDirectory` carries the classified slots beyond the terminator; the
   observation reporting them is retained unchanged (ADR-0009 §4.4)
+- `cluster_offset` and `read_fat_entry` widened from private to
+  `pub(crate)`; neither moved (ADR-0010 §9)
+- The in-memory `EvidenceReader` test double moved from `fat_directory.rs`
+  into `evidence.rs`, where the trait it implements is declared, so both
+  test modules share one rather than duplicating it (ADR-0010 Appendix C)
