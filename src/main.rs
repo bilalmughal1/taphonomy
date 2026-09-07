@@ -11,6 +11,7 @@ use taphonomy::EvidenceFile;
 use taphonomy::fat_directory::{
     DeletedKind, Entry, EntryKind, FirstByte, associate, enumerate_root, recovered_name,
 };
+use taphonomy::fat_recovery::{Assessment, assess, extract};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
@@ -21,16 +22,27 @@ fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
 
     let Some(path) = args.next() else {
-        eprintln!("usage: taphonomy <evidence-image>");
+        eprintln!("usage: taphonomy <evidence-image> [--recover]");
         return ExitCode::from(2);
     };
 
-    if args.next().is_some() {
-        eprintln!("error: expected exactly one path");
-        return ExitCode::from(2);
+    // One flag, matched exactly. ADR-0010 Decision B puts reading a deleted
+    // file's content behind an explicit request; it does not call for an
+    // argument parser, and adding a dependency for one boolean would be the
+    // largest thing in this crate's tree.
+    let mut recover = false;
+    for arg in args {
+        match arg.to_str() {
+            Some("--recover") => recover = true,
+            _ => {
+                eprintln!("error: unexpected argument");
+                eprintln!("usage: taphonomy <evidence-image> [--recover]");
+                return ExitCode::from(2);
+            }
+        }
     }
 
-    match inspect(&path) {
+    match inspect(&path, recover) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -39,7 +51,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
+fn inspect(path: &std::ffi::OsStr, recover: bool) -> Result<(), taphonomy::Error> {
     let mut evidence = EvidenceFile::open(path)?;
     let reported = evidence.reported_size();
     let result = evidence.digest()?;
@@ -81,7 +93,7 @@ fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
 
                             println!();
                             for p in &partitions {
-                                report_partition(&mut evidence, p);
+                                report_partition(&mut evidence, p, recover);
                             }
                         }
                         PartitionTable::GptProtective => {
@@ -111,7 +123,7 @@ fn inspect(path: &std::ffi::OsStr) -> Result<(), taphonomy::Error> {
 /// A read or identification failure for one partition is reported and does
 /// not stop the others, nor change the process exit code: hashing already
 /// succeeded and that result stands on its own.
-fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition) {
+fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, recover: bool) {
     let mut vbr = [0u8; VBR_SIZE];
     if let Err(e) = evidence.read_exact_at(p.start_byte(), &mut vbr) {
         eprintln!("error: partition {}: {e}", p.index);
@@ -191,7 +203,7 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition) {
                 }
             }
 
-            report_root_directory(evidence, &boot, extent);
+            report_root_directory(evidence, &boot, extent, recover);
         }
         Err(e) => {
             println!("    BOOT SECTOR REJECTED: {e}");
@@ -217,6 +229,7 @@ fn report_root_directory(
     evidence: &mut EvidenceFile,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
+    recover: bool,
 ) {
     let root = match enumerate_root(evidence, boot, extent) {
         Ok(root) => root,
@@ -251,6 +264,112 @@ fn report_root_directory(
         for o in &root.observations {
             println!("        {o}");
         }
+    }
+
+    report_recovery(evidence, boot, extent, &root.entries, recover);
+    report_recovery(evidence, boot, extent, &root.residue, recover);
+}
+
+/// Reports what the volume says about each deleted entry's content.
+///
+/// `ADR-0010` Decision B. Without `--recover` this reads the FAT and reports
+/// the run each deleted entry implies; with it, the runs that pass are read
+/// and hashed. The first is what the volume states, the second is derived
+/// from an assumption the evidence cannot confirm.
+///
+/// An assessment failure is reported and does not stop the others, for the
+/// same reason a read failure does not: what already succeeded stands.
+fn report_recovery(
+    evidence: &mut EvidenceFile,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    entries: &[Entry],
+    recover: bool,
+) {
+    let mut heading = false;
+    let mut any_free = false;
+
+    let head = |heading: &mut bool| {
+        if !*heading {
+            println!("      deleted content");
+            *heading = true;
+        }
+    };
+
+    for entry in entries {
+        let position = format!("c{} s{}", entry.cluster, entry.slot);
+
+        let assessment = match assess(entry, boot, extent, evidence) {
+            Ok(None) => continue,
+            Ok(Some(assessment)) => assessment,
+            Err(e) => {
+                head(&mut heading);
+                println!("        {position:<9} NOT ASSESSED: {e}");
+                continue;
+            }
+        };
+
+        head(&mut heading);
+
+        match assessment {
+            Assessment::Ineligible(reason) => {
+                println!("        {position:<9} no content: {reason}");
+            }
+            Assessment::RunBroken {
+                run,
+                first_allocated,
+            } => {
+                let detail = format!(
+                    "run {}-{}, {} bytes, REFUSED: cluster {first_allocated} is in use",
+                    run.first_cluster,
+                    run.last_cluster(),
+                    run.file_size
+                );
+                println!("        {position:<9} {detail}");
+            }
+            Assessment::Recoverable(found) => {
+                any_free = true;
+                let run = found.run();
+                let detail = format!(
+                    "run {}-{}, {} bytes, {} slack, every cluster free",
+                    run.first_cluster,
+                    run.last_cluster(),
+                    run.file_size,
+                    run.slack_bytes
+                );
+                println!("        {position:<9} {detail}");
+
+                if recover {
+                    match extract(&found, boot, extent, evidence) {
+                        Ok(extracted) => {
+                            println!(
+                                "        {:<9} sha256 {} over {} bytes",
+                                "", extracted.digest, extracted.bytes_hashed
+                            );
+                        }
+                        Err(e) => {
+                            println!("        {:<9} NOT EXTRACTED: {e}", "");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !any_free {
+        return;
+    }
+
+    // ADR-0003 section 4.2 and ADR-0010 Decision C. Saying only that the run
+    // is free would let a reader take it for a finding. It is the absence of
+    // contrary evidence, which is not the same thing and never becomes it.
+    println!();
+    println!("      A free run means nothing has claimed those");
+    println!("      clusters since deletion. It is not evidence");
+    println!("      that the content there is this file's.");
+
+    if !recover {
+        println!("      No content read. Pass --recover to read it.");
     }
 }
 
