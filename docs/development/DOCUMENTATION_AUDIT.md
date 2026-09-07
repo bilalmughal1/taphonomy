@@ -304,7 +304,7 @@ left unmodified. This section tracks resolution against the §10 numbering.
 | 1. Reconcile the three confidence models | RESOLVED | `9e87f85` |
 | 2. Resolve agent commit authority | RESOLVED | `2af499a` |
 | 3. Close or re-open `RESEARCH_LOG.md` §8 questions 1, 3, 4, 5 | RESOLVED | `1686525` |
-| 4. Decide a single owner document for each duplicated rule family | DEFERRED | deferred until after the first recovery milestone |
+| 4. Decide a single owner document for each duplicated rule family | RESOLVED | `ADR-0011`, which declines it; see its section 5 |
 | 5. Mark `ARCHITECTURE.md` sections as aspirational | RESOLVED | `45d9b3f` |
 | 6. Choose one heading convention or configure markdownlint | RESOLVED | `d2d2d30` |
 | 7. Populate or remove the four empty documents | RESOLVED | `c913b6b`, `d148466` |
@@ -313,3 +313,11 @@ Finding 4.1's section citations (`CLAUDE.md` §28/§31 and
 `DEVELOPMENT_ENVIRONMENT.md` §24) were corrected in a later commit,
 `d8654f4`, after the citations were found not to match the sections they
 named.
+
+Item 4 was re-derived at `334dc7c` before being answered. The duplication is
+larger than §3 recorded, and most of it binds different subjects, so
+`ADR-0011` declines to assign a single owner and records why. `ADR-0011`
+§1.2 also corrects the example of modal drift this document gives in §3.1:
+the two statements it compares are different rules. A genuine contradiction
+exists between `docs/PROJECT.md` §6.1 and `docs/SAFETY.md` §4.1, and is
+fixed separately.
