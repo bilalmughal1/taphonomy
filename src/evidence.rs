@@ -133,3 +133,61 @@ impl EvidenceReader for EvidenceFile {
         EvidenceFile::read_exact_at(self, offset, buf)
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// An in-memory evidence image.
+    ///
+    /// Regions are written explicitly; everything else reads as zero, which
+    /// is what a freshly formatted volume holds.
+    ///
+    /// A read that runs past `len` fails, because `EvidenceFile` fails when
+    /// the file ends before the buffer is filled. A double that padded
+    /// instead would let these tests pass against behaviour the real type
+    /// does not have.
+    pub(crate) struct MemoryImage {
+        len: u64,
+        regions: Vec<(u64, Vec<u8>)>,
+    }
+
+    impl MemoryImage {
+        pub(crate) fn new(len: u64) -> Self {
+            Self {
+                len,
+                regions: Vec::new(),
+            }
+        }
+
+        pub(crate) fn write(&mut self, offset: u64, bytes: &[u8]) {
+            self.regions.push((offset, bytes.to_vec()));
+        }
+    }
+
+    impl EvidenceReader for MemoryImage {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+            let end = offset + buf.len() as u64;
+            if end > self.len {
+                return Err(Error::from_io(
+                    std::path::Path::new("<memory>"),
+                    std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+                ));
+            }
+
+            buf.fill(0);
+            for (start, bytes) in &self.regions {
+                let region_end = start + bytes.len() as u64;
+                let lo = (*start).max(offset);
+                let hi = region_end.min(end);
+                if lo < hi {
+                    let src = (lo - start) as usize;
+                    let dst = (lo - offset) as usize;
+                    let n = (hi - lo) as usize;
+                    buf[dst..dst + n].copy_from_slice(&bytes[src..src + n]);
+                }
+            }
+            Ok(())
+        }
+    }
+}

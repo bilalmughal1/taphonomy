@@ -982,6 +982,7 @@ fn read_fat_entry<R: EvidenceReader>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence::tests::MemoryImage;
 
     /// An entry with the name field set and everything else zeroed.
     fn entry(name: &[u8; NAME_LEN], attr: u8) -> [u8; ENTRY_BYTES] {
@@ -1452,32 +1453,7 @@ mod tests {
     /// Bytes in the whole evidence image.
     const IMAGE_BYTES: u64 = 67_108_864;
 
-    /// An in-memory evidence image.
-    ///
-    /// Regions are written explicitly; everything else reads as zero, which
-    /// is what a freshly formatted volume holds.
-    ///
-    /// A read that runs past `len` fails, because `EvidenceFile` fails when
-    /// the file ends before the buffer is filled. A double that padded
-    /// instead would let these tests pass against behaviour the real type
-    /// does not have.
-    struct MemoryImage {
-        len: u64,
-        regions: Vec<(u64, Vec<u8>)>,
-    }
-
     impl MemoryImage {
-        fn new(len: u64) -> Self {
-            Self {
-                len,
-                regions: Vec::new(),
-            }
-        }
-
-        fn write(&mut self, offset: u64, bytes: &[u8]) {
-            self.regions.push((offset, bytes.to_vec()));
-        }
-
         /// Writes one FAT entry into the FAT beginning at `fat_base`.
         fn write_fat(&mut self, fat_base: u64, cluster: u32, value: u32) {
             self.write(fat_base + cluster as u64 * 4, &value.to_le_bytes());
@@ -1494,32 +1470,6 @@ mod tests {
                 CLUSTER2_BASE + (cluster as u64 - 2) * CLUSTER_BYTES as u64,
                 &bytes,
             );
-        }
-    }
-
-    impl EvidenceReader for MemoryImage {
-        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
-            let end = offset + buf.len() as u64;
-            if end > self.len {
-                return Err(Error::from_io(
-                    std::path::Path::new("<memory>"),
-                    std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
-                ));
-            }
-
-            buf.fill(0);
-            for (start, bytes) in &self.regions {
-                let region_end = start + bytes.len() as u64;
-                let lo = (*start).max(offset);
-                let hi = region_end.min(end);
-                if lo < hi {
-                    let src = (lo - start) as usize;
-                    let dst = (lo - offset) as usize;
-                    let n = (hi - lo) as usize;
-                    buf[dst..dst + n].copy_from_slice(&bytes[src..src + n]);
-                }
-            }
-            Ok(())
         }
     }
 
