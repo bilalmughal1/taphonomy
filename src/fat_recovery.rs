@@ -25,16 +25,21 @@
 //! Eligibility and the implied run are computed from the entry and the
 //! volume's geometry alone, reading nothing, so they can be tested against
 //! entries built by hand. [`assess`] reads the active FAT to check the run
-//! against it, and reads nothing else. No data cluster is read anywhere in
-//! this file: extraction is not yet implemented.
+//! against it. [`extract`] reads the run's data clusters, streaming one
+//! cluster at a time, and returns a digest of the file's bytes without the
+//! bytes themselves.
 
 use std::fmt;
 
+use crate::error::Error;
 use crate::evidence::EvidenceReader;
 use crate::fat::FIRST_DATA_CLUSTER;
-use crate::fat_directory::{DeletedKind, DirectoryError, Entry, EntryKind, read_fat_entry};
+use crate::fat_directory::{
+    DeletedKind, DirectoryError, Entry, EntryKind, cluster_offset, read_fat_entry,
+};
 use crate::fat32::Fat32BootSector;
 use crate::filesystem::VolumeExtent;
+use crate::hash::{Sha256Digest, Sha256Hasher};
 
 /// The run of clusters a deleted entry implies for its content.
 ///
@@ -289,6 +294,13 @@ pub enum RecoveryError {
     /// kind of failure: `read_fat_entry` and `cluster_offset` return
     /// `DirectoryError` and stay in `fat_directory`. ADR-0010 Appendix B6.
     Directory(DirectoryError),
+
+    /// A read of a data cluster failed.
+    ///
+    /// Distinct from the variant above, which reaches this module through
+    /// the shared helpers. This one is a read this module made itself, and
+    /// keeping them apart records where the failure happened.
+    Evidence(Error),
 }
 
 impl From<DirectoryError> for RecoveryError {
@@ -297,10 +309,17 @@ impl From<DirectoryError> for RecoveryError {
     }
 }
 
+impl From<Error> for RecoveryError {
+    fn from(e: Error) -> Self {
+        RecoveryError::Evidence(e)
+    }
+}
+
 impl fmt::Display for RecoveryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RecoveryError::Directory(e) => write!(f, "{e}"),
+            RecoveryError::Evidence(e) => write!(f, "{e}"),
         }
     }
 }
@@ -309,6 +328,7 @@ impl std::error::Error for RecoveryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RecoveryError::Directory(e) => Some(e),
+            RecoveryError::Evidence(e) => Some(e),
         }
     }
 }
@@ -355,6 +375,83 @@ pub fn assess<R: EvidenceReader>(
     Ok(Some(Assessment::Recoverable(UnallocatedRun(run))))
 }
 
+/// The result of reading a run's content.
+///
+/// The content is not here. ADR-0010 Decision A: M7 extracts to memory,
+/// hashes what it extracted, and reports. Nothing is written, and nothing is
+/// returned that a caller could mistake for a recovered file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Extraction {
+    /// Digest of the file's bytes, and of nothing else.
+    pub digest: Sha256Digest,
+
+    /// Number of bytes hashed, counted by the hasher rather than assumed.
+    ///
+    /// Equal to the size the entry declared. It is reported so that the
+    /// digest is never separated from a statement of what it covers.
+    pub bytes_hashed: u64,
+
+    /// Bytes of the final cluster that were read and not hashed.
+    ///
+    /// File slack. It belongs to whatever held the cluster before this file
+    /// and is evidence in its own right, so its size is reported rather
+    /// than silently dropped. Recovering it is a separate capability and is
+    /// not this milestone's.
+    pub slack_bytes: u32,
+}
+
+/// Reads a run's content and returns a digest of it.
+///
+/// Requires an [`UnallocatedRun`], which only [`assess`] produces and only
+/// after every cluster in the run has read as free. A run the FAT reports as
+/// in use cannot reach this function.
+///
+/// A digest is not a verdict. It states what these bytes are, not that these
+/// bytes are the file's. Nothing here establishes that the run held this
+/// file's content, and ADR-0003 section 3.1 governs what may be done with a
+/// result no validator has seen.
+///
+/// Streams. One cluster-sized buffer is allocated and reused, so memory does
+/// not scale with the declared size, which is untrusted evidence under
+/// `SECURITY.md` section 16.
+///
+/// The final cluster is read whole, because a cluster is the unit the volume
+/// addresses, and its slack is then excluded from the digest.
+pub fn extract<R: EvidenceReader>(
+    found: &UnallocatedRun,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    reader: &mut R,
+) -> Result<Extraction, RecoveryError> {
+    let run = found.run();
+    let cluster_bytes = boot.geometry.cluster_bytes() as usize;
+
+    // One buffer for the whole run. `file_size` is never allocated.
+    let mut buffer = vec![0u8; cluster_bytes];
+    let mut hasher = Sha256Hasher::new();
+    let mut remaining = run.file_size as u64;
+
+    for cluster in run.first_cluster..=run.last_cluster() {
+        let offset = cluster_offset(boot, extent, cluster)?;
+        reader.read_exact_at(offset, &mut buffer)?;
+
+        // The last cluster contributes only the bytes the file declares.
+        // Every earlier one contributes all of them, because the run length
+        // was computed from the same size.
+        let take = remaining.min(cluster_bytes as u64) as usize;
+        hasher.update(&buffer[..take]);
+        remaining -= take as u64;
+    }
+
+    let hashed = hasher.finish();
+
+    Ok(Extraction {
+        digest: hashed.digest,
+        bytes_hashed: hashed.bytes_read,
+        slack_bytes: run.slack_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +464,12 @@ mod tests {
     /// Byte offset of the first FAT, and of the second.
     const FAT0_BASE: u64 = 1_064_960;
     const FAT1_BASE: u64 = 1_573_376;
+
+    /// Byte offset of cluster 2, the first data cluster.
+    const CLUSTER2_BASE: u64 = 2_081_792;
+
+    /// Bytes in one cluster of the synthetic volume.
+    const CLUSTER_BYTES: usize = 512;
 
     /// Bytes in the whole evidence image.
     const IMAGE_BYTES: u64 = 67_108_864;
@@ -457,6 +560,11 @@ mod tests {
             FAT0_BASE
         );
         assert_eq!(FAT0_BASE + boot.geometry.fat_size as u64 * 512, FAT1_BASE);
+        assert_eq!(
+            FAT1_BASE + boot.geometry.fat_size as u64 * 512,
+            CLUSTER2_BASE
+        );
+        assert_eq!(boot.geometry.cluster_bytes() as usize, CLUSTER_BYTES);
     }
 
     #[test]
@@ -803,5 +911,156 @@ mod tests {
 
         assert!(!error.to_string().is_empty());
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    /// Writes raw bytes at the start of a data cluster.
+    fn write_cluster_bytes(image: &mut MemoryImage, cluster: u32, bytes: &[u8]) {
+        image.write(
+            CLUSTER2_BASE + (cluster as u64 - 2) * CLUSTER_BYTES as u64,
+            bytes,
+        );
+    }
+
+    /// The digest of exactly these bytes.
+    ///
+    /// Computed through `hash_reader` over an independently built slice, so
+    /// what the assertion tests is which bytes `extract` hashed. That the
+    /// digest is SHA-256 is established by `tests/nist_vectors.rs`.
+    fn digest_of(bytes: &[u8]) -> Sha256Digest {
+        let mut input = bytes;
+        crate::hash::hash_reader(&mut input)
+            .expect("hashing a slice cannot fail")
+            .digest
+    }
+
+    /// An `UnallocatedRun` obtained the only way there is: by assessing an
+    /// entry against a FAT that reports every cluster free.
+    fn recoverable(
+        entry: &Entry,
+        boot: &Fat32BootSector,
+        image: &mut MemoryImage,
+    ) -> UnallocatedRun {
+        match assessed(entry, boot, image) {
+            Assessment::Recoverable(found) => found,
+            other => panic!("expected Recoverable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_file_shorter_than_a_cluster_hashes_only_its_own_bytes() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        let content = b"taphonomy no long name fixture";
+        write_cluster_bytes(&mut image, 4, content);
+
+        let found = recoverable(&deleted_file(4, content.len() as u32), &boot, &mut image);
+        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+
+        assert_eq!(extracted.digest, digest_of(content));
+        assert_eq!(extracted.bytes_hashed, content.len() as u64);
+    }
+
+    /// The bytes past the file's end are the previous occupant's. Reading
+    /// the cluster whole is correct; hashing it whole is not.
+    #[test]
+    fn slack_is_read_and_not_hashed() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        let mut cluster = vec![0xAAu8; CLUSTER_BYTES];
+        let content = b"thirty bytes of file content..";
+        cluster[..content.len()].copy_from_slice(content);
+        write_cluster_bytes(&mut image, 4, &cluster);
+
+        let found = recoverable(&deleted_file(4, content.len() as u32), &boot, &mut image);
+        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+
+        assert_eq!(extracted.digest, digest_of(content));
+        assert_ne!(
+            extracted.digest,
+            digest_of(&cluster),
+            "the whole cluster was hashed, so slack was included"
+        );
+        assert_eq!(
+            extracted.slack_bytes,
+            (CLUSTER_BYTES - content.len()) as u32
+        );
+    }
+
+    #[test]
+    fn a_run_of_several_clusters_is_assembled_in_order() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        let first = vec![b'A'; CLUSTER_BYTES];
+        let second = vec![b'B'; CLUSTER_BYTES];
+        let third = vec![b'C'; 100];
+        write_cluster_bytes(&mut image, 4, &first);
+        write_cluster_bytes(&mut image, 5, &second);
+        write_cluster_bytes(&mut image, 6, &third);
+
+        let size = CLUSTER_BYTES * 2 + third.len();
+        let found = recoverable(&deleted_file(4, size as u32), &boot, &mut image);
+        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&first);
+        expected.extend_from_slice(&second);
+        expected.extend_from_slice(&third);
+
+        assert_eq!(extracted.digest, digest_of(&expected));
+        assert_eq!(extracted.bytes_hashed, size as u64);
+        assert_eq!(extracted.slack_bytes, (CLUSTER_BYTES - third.len()) as u32);
+    }
+
+    /// Order is part of the content. A run read back to front would hash to
+    /// something else, and this fails if the loop ever stops caring.
+    #[test]
+    fn the_order_of_the_clusters_changes_the_digest() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        let first = vec![b'A'; CLUSTER_BYTES];
+        let second = vec![b'B'; CLUSTER_BYTES];
+        write_cluster_bytes(&mut image, 4, &first);
+        write_cluster_bytes(&mut image, 5, &second);
+
+        let size = CLUSTER_BYTES * 2;
+        let found = recoverable(&deleted_file(4, size as u32), &boot, &mut image);
+        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+
+        let mut reversed = Vec::new();
+        reversed.extend_from_slice(&second);
+        reversed.extend_from_slice(&first);
+
+        assert_ne!(extracted.digest, digest_of(&reversed));
+    }
+
+    /// A cluster never written reads as zero, which is what a freshly
+    /// formatted volume holds. That is content, not an error.
+    #[test]
+    fn an_unwritten_cluster_hashes_as_zeroes() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        let found = recoverable(&deleted_file(4, 100), &boot, &mut image);
+        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+
+        assert_eq!(extracted.digest, digest_of(&[0u8; 100]));
+    }
+
+    #[test]
+    fn a_read_past_the_end_of_evidence_fails_the_extraction() {
+        let boot = boot();
+        let mut full = MemoryImage::new(IMAGE_BYTES);
+        let found = recoverable(&deleted_file(4, 30), &boot, &mut full);
+
+        let mut truncated = MemoryImage::new(CLUSTER2_BASE);
+        let result = extract(&found, &boot, extent(), &mut truncated);
+
+        assert!(
+            matches!(result, Err(RecoveryError::Evidence(_))),
+            "expected an evidence read failure, got {result:?}"
+        );
     }
 }

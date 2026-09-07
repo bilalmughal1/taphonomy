@@ -761,7 +761,7 @@ fn trim_trailing_spaces(bytes: &[u8]) -> &str {
 }
 
 /// Byte offset of a cluster's first sector, relative to the evidence.
-fn cluster_offset(
+pub(crate) fn cluster_offset(
     boot: &Fat32BootSector,
     extent: VolumeExtent,
     cluster: u32,
