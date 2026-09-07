@@ -163,7 +163,7 @@ Taphonomy will not:
 
 ### 6.1 Evidence Preservation
 
-The original source should be treated as immutable evidence whenever possible.
+The original source must be treated as immutable evidence whenever technically possible.
 
 Analysis and recovery should operate against a verified image or other controlled copy.
 
