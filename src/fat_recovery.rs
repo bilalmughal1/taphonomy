@@ -22,14 +22,19 @@
 //! ADR-0010 Decision A: nothing in this module writes a file. Extraction is
 //! to memory and the result is a digest.
 //!
-//! This file covers eligibility and the implied run only. It performs no
-//! I/O, so it can be tested against entries built by hand.
+//! Eligibility and the implied run are computed from the entry and the
+//! volume's geometry alone, reading nothing, so they can be tested against
+//! entries built by hand. [`assess`] reads the active FAT to check the run
+//! against it, and reads nothing else. No data cluster is read anywhere in
+//! this file: extraction is not yet implemented.
 
 use std::fmt;
 
+use crate::evidence::EvidenceReader;
 use crate::fat::FIRST_DATA_CLUSTER;
-use crate::fat_directory::{DeletedKind, Entry, EntryKind};
+use crate::fat_directory::{DeletedKind, DirectoryError, Entry, EntryKind, read_fat_entry};
 use crate::fat32::Fat32BootSector;
+use crate::filesystem::VolumeExtent;
 
 /// The run of clusters a deleted entry implies for its content.
 ///
@@ -140,7 +145,7 @@ impl fmt::Display for Ineligible {
 
 /// What a deleted entry's fields imply about its content.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Eligibility {
+enum Eligibility {
     /// The content cannot be located, for the reason given.
     Refused(Ineligible),
 
@@ -158,7 +163,7 @@ pub enum Eligibility {
 /// Reads no evidence. The answer is a function of the entry and the volume's
 /// geometry, so a wrong answer here is a wrong answer about arithmetic and
 /// not about what is on the disk.
-pub fn eligibility(entry: &Entry, boot: &Fat32BootSector) -> Option<Eligibility> {
+fn eligibility(entry: &Entry, boot: &Fat32BootSector) -> Option<Eligibility> {
     let EntryKind::Deleted { was } = &entry.kind else {
         return None;
     };
@@ -220,14 +225,151 @@ pub fn eligibility(entry: &Entry, boot: &Fat32BootSector) -> Option<Eligibility>
     }))
 }
 
+/// A run every cluster of which the active FAT reports as unallocated.
+///
+/// Constructible only by [`assess`], and only after every cluster in the run
+/// has been read and found free. Extraction takes one of these, so a call
+/// that extracts a run the FAT says is in use cannot be written: the
+/// argument cannot be obtained. ADR-0010 Decision C, enforced by the
+/// compiler rather than by discipline.
+///
+/// A free run is a necessary condition for attempting an extraction and not
+/// a sufficient one for believing the result. Clusters can be written and
+/// freed again, leaving the FAT zero and the content foreign. ADR-0003
+/// section 4.2 forbids raising a level on the absence of contrary evidence,
+/// and nothing here raises anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UnallocatedRun(ClusterRun);
+
+impl UnallocatedRun {
+    /// The run, for reporting.
+    ///
+    /// Read-only. A `ClusterRun` copied out of this cannot be used to
+    /// extract, because extraction requires the wrapper and not its
+    /// contents.
+    pub const fn run(&self) -> &ClusterRun {
+        &self.0
+    }
+}
+
+/// What the volume says about a deleted entry's content.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Assessment {
+    /// The content cannot be located, for the reason given.
+    Ineligible(Ineligible),
+
+    /// A cluster inside the implied run is allocated, so the run is broken.
+    ///
+    /// Either the file was fragmented, or its clusters have been reused
+    /// since it was deleted. In both cases the bytes at those offsets are
+    /// not this file's. Where the first cluster itself is allocated, the
+    /// entry may instead be the remains of a move within the volume, with a
+    /// live entry elsewhere describing the same clusters and a better size.
+    RunBroken {
+        /// The run the entry implies.
+        run: ClusterRun,
+        /// The first cluster of the run that the FAT reports as in use.
+        first_allocated: u32,
+    },
+
+    /// Every cluster in the implied run reads as unallocated.
+    Recoverable(UnallocatedRun),
+}
+
+/// A failure that stopped an assessment from being made.
+///
+/// Distinct from [`Ineligible`], which is a fact about the evidence and
+/// travels in the `Ok` arm. This is a fault in reading the evidence, not
+/// something the evidence says.
+#[derive(Debug)]
+pub enum RecoveryError {
+    /// An offset computation or a FAT read failed.
+    ///
+    /// Named for the module the shared helpers live in rather than for the
+    /// kind of failure: `read_fat_entry` and `cluster_offset` return
+    /// `DirectoryError` and stay in `fat_directory`. ADR-0010 Appendix B6.
+    Directory(DirectoryError),
+}
+
+impl From<DirectoryError> for RecoveryError {
+    fn from(e: DirectoryError) -> Self {
+        RecoveryError::Directory(e)
+    }
+}
+
+impl fmt::Display for RecoveryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecoveryError::Directory(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for RecoveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RecoveryError::Directory(e) => Some(e),
+        }
+    }
+}
+
+/// What the volume says about where a deleted entry's content lay.
+///
+/// Returns `None` when the entry is not a deleted file, in which case the
+/// question does not arise.
+///
+/// Reads the active FAT and nothing else. No data cluster is touched, so
+/// this costs one four-byte read per cluster of the implied run and reveals
+/// nothing about the content.
+///
+/// The FAT can only refuse. Every cluster reading free does not establish
+/// that the run holds this file's bytes; it establishes only that nothing
+/// has claimed those clusters since the entry was deleted.
+pub fn assess<R: EvidenceReader>(
+    entry: &Entry,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    reader: &mut R,
+) -> Result<Option<Assessment>, RecoveryError> {
+    let run = match eligibility(entry, boot) {
+        None => return Ok(None),
+        Some(Eligibility::Refused(reason)) => return Ok(Some(Assessment::Ineligible(reason))),
+        Some(Eligibility::Run(run)) => run,
+    };
+
+    // Derived here, never passed in. Where mirroring is disabled the other
+    // FATs are stale, and an allocation answer read from a stale FAT would
+    // be confidently wrong. `unwrap_or(0)` is not a fallback for a missing
+    // answer: when mirroring is enabled every FAT is current.
+    let fat_index = boot.active_fat().unwrap_or(0);
+
+    for cluster in run.first_cluster..=run.last_cluster() {
+        if read_fat_entry(reader, boot, extent, fat_index, cluster)? != 0 {
+            return Ok(Some(Assessment::RunBroken {
+                run,
+                first_allocated: cluster,
+            }));
+        }
+    }
+
+    Ok(Some(Assessment::Recoverable(UnallocatedRun(run))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence::tests::MemoryImage;
     use crate::fat_directory::NAME_LEN;
-    use crate::filesystem::VolumeExtent;
 
     const START_LBA: u32 = 2048;
     const TOTAL_SECTORS: u32 = 129_024;
+
+    /// Byte offset of the first FAT, and of the second.
+    const FAT0_BASE: u64 = 1_064_960;
+    const FAT1_BASE: u64 = 1_573_376;
+
+    /// Bytes in the whole evidence image.
+    const IMAGE_BYTES: u64 = 67_108_864;
 
     /// Data clusters in the synthetic volume, from its declared geometry:
     /// 129,024 total less 32 reserved and two FATs of 993 sectors each, at
@@ -242,18 +384,31 @@ mod tests {
         }
     }
 
-    /// A parsed boot sector for the synthetic volume.
+    /// A parsed boot sector for the synthetic volume, with mirroring on.
     fn boot() -> Fat32BootSector {
+        boot_flags(0)
+    }
+
+    /// A parsed boot sector for the synthetic volume with the given
+    /// `BPB_ExtFlags`.
+    fn boot_flags(ext_flags: u16) -> Fat32BootSector {
         use crate::fat32::{
-            OFF_BACKUP_BOOT_SECTOR, OFF_FS_INFO_SECTOR, OFF_ROOT_CLUSTER, parse_boot_sector,
+            OFF_BACKUP_BOOT_SECTOR, OFF_EXT_FLAGS, OFF_FS_INFO_SECTOR, OFF_ROOT_CLUSTER,
+            parse_boot_sector,
         };
 
         let mut s = crate::fat::tests::fat32_sector();
         s[OFF_ROOT_CLUSTER..OFF_ROOT_CLUSTER + 4].copy_from_slice(&2u32.to_le_bytes());
         s[OFF_FS_INFO_SECTOR..OFF_FS_INFO_SECTOR + 2].copy_from_slice(&1u16.to_le_bytes());
         s[OFF_BACKUP_BOOT_SECTOR..OFF_BACKUP_BOOT_SECTOR + 2].copy_from_slice(&6u16.to_le_bytes());
+        s[OFF_EXT_FLAGS..OFF_EXT_FLAGS + 2].copy_from_slice(&ext_flags.to_le_bytes());
 
         parse_boot_sector(&s, extent()).expect("the synthetic boot sector is valid FAT32")
+    }
+
+    /// Writes one FAT entry into the FAT beginning at `fat_base`.
+    fn write_fat(image: &mut MemoryImage, fat_base: u64, cluster: u32, value: u32) {
+        image.write(fat_base + cluster as u64 * 4, &value.to_le_bytes());
     }
 
     fn deleted(was: DeletedKind) -> Entry {
@@ -297,6 +452,11 @@ mod tests {
         let boot = boot();
         assert_eq!(boot.geometry.cluster_count, DATA_CLUSTERS);
         assert_eq!(boot.geometry.cluster_bytes(), 512);
+        assert_eq!(
+            (START_LBA as u64 + boot.geometry.reserved_sectors as u64) * 512,
+            FAT0_BASE
+        );
+        assert_eq!(FAT0_BASE + boot.geometry.fat_size as u64 * 512, FAT1_BASE);
     }
 
     #[test]
@@ -476,5 +636,172 @@ mod tests {
         for reason in reasons {
             assert!(!reason.to_string().is_empty(), "{reason:?} rendered empty");
         }
+    }
+
+    /// Reads an assessment that must exist and must not fail.
+    fn assessed(entry: &Entry, boot: &Fat32BootSector, image: &mut MemoryImage) -> Assessment {
+        assess(entry, boot, extent(), image)
+            .expect("no read in these fixtures runs past the end")
+            .expect("the entry is a deleted file")
+    }
+
+    #[test]
+    fn a_free_run_is_recoverable() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        match assessed(&deleted_file(4, 513), &boot, &mut image) {
+            Assessment::Recoverable(found) => {
+                assert_eq!(found.run().first_cluster, 4);
+                assert_eq!(found.run().cluster_count, 2);
+                assert_eq!(found.run().last_cluster(), 5);
+            }
+            other => panic!("expected Recoverable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_allocated_cluster_inside_the_run_breaks_it() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        write_fat(&mut image, FAT0_BASE, 5, 0x0FFF_FFFF);
+
+        match assessed(&deleted_file(4, 1025), &boot, &mut image) {
+            Assessment::RunBroken {
+                run,
+                first_allocated,
+            } => {
+                assert_eq!(first_allocated, 5);
+                assert_eq!(run.cluster_count, 3, "the run is still reported in full");
+            }
+            other => panic!("expected RunBroken, got {other:?}"),
+        }
+    }
+
+    /// The starting cluster is refused like any other. It is also the case
+    /// where the entry may be the remains of a move rather than a deletion.
+    #[test]
+    fn an_allocated_first_cluster_breaks_the_run() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        write_fat(&mut image, FAT0_BASE, 4, 0x0FFF_FFFF);
+
+        match assessed(&deleted_file(4, 30), &boot, &mut image) {
+            Assessment::RunBroken {
+                first_allocated, ..
+            } => assert_eq!(first_allocated, 4),
+            other => panic!("expected RunBroken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_earliest_allocated_cluster_is_the_one_reported() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        write_fat(&mut image, FAT0_BASE, 6, 0x0FFF_FFFF);
+        write_fat(&mut image, FAT0_BASE, 5, 0x0FFF_FFFF);
+
+        match assessed(&deleted_file(4, 2000), &boot, &mut image) {
+            Assessment::RunBroken {
+                first_allocated, ..
+            } => assert_eq!(first_allocated, 5, "5 is reached before 6"),
+            other => panic!("expected RunBroken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ineligible_entry_is_reported_as_ineligible() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        let entry = deleted(DeletedKind::ShortName {
+            surviving_name: [b'X'; NAME_LEN - 1],
+            directory: true,
+            first_cluster: 5,
+            file_size: 0,
+            nt_res: 0,
+        });
+
+        assert_eq!(
+            assessed(&entry, &boot, &mut image),
+            Assessment::Ineligible(Ineligible::Directory)
+        );
+    }
+
+    #[test]
+    fn a_live_entry_is_not_assessed() {
+        let boot = boot();
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        let entry = Entry {
+            cluster: 2,
+            slot: 0,
+            kind: EntryKind::Terminator,
+        };
+
+        assert_eq!(
+            assess(&entry, &boot, extent(), &mut image).expect("no read is attempted"),
+            None
+        );
+    }
+
+    /// ADR-0010 Appendix B7. Mirroring disabled and FAT 1 active: the answer
+    /// must come from FAT 1, which says the cluster is in use, and not from
+    /// FAT 0, which is stale and says it is free.
+    #[test]
+    fn the_active_fat_is_read_when_mirroring_is_disabled() {
+        let boot = boot_flags(0x0081);
+        assert_eq!(boot.active_fat(), Some(1), "fixture premise");
+
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        write_fat(&mut image, FAT1_BASE, 4, 0x0FFF_FFFF);
+
+        match assessed(&deleted_file(4, 30), &boot, &mut image) {
+            Assessment::RunBroken {
+                first_allocated, ..
+            } => assert_eq!(first_allocated, 4),
+            other => panic!("FAT 1 is active and reports cluster 4 in use, got {other:?}"),
+        }
+    }
+
+    /// The other half of the pair. With mirroring enabled FAT 0 is
+    /// authoritative, and a value written only into FAT 1 must not be read.
+    /// Either test alone would pass with the index chosen wrongly.
+    #[test]
+    fn fat_zero_is_read_when_mirroring_is_enabled() {
+        let boot = boot();
+        assert_eq!(boot.active_fat(), None, "fixture premise");
+
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        write_fat(&mut image, FAT1_BASE, 4, 0x0FFF_FFFF);
+
+        match assessed(&deleted_file(4, 30), &boot, &mut image) {
+            Assessment::Recoverable(_) => {}
+            other => panic!("FAT 0 is authoritative and reports cluster 4 free, got {other:?}"),
+        }
+    }
+
+    /// A fault in reading is an error. It is not an `Ineligible`, which is
+    /// something the evidence says rather than something that went wrong.
+    #[test]
+    fn a_read_past_the_end_of_evidence_is_an_error_not_a_refusal() {
+        let boot = boot();
+        let mut image = MemoryImage::new(FAT0_BASE);
+
+        let result = assess(&deleted_file(4, 30), &boot, extent(), &mut image);
+
+        assert!(
+            matches!(result, Err(RecoveryError::Directory(_))),
+            "expected a read failure, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_recovery_error_renders_and_carries_its_source() {
+        let boot = boot();
+        let mut image = MemoryImage::new(FAT0_BASE);
+        let error = assess(&deleted_file(4, 30), &boot, extent(), &mut image)
+            .expect_err("the read runs past the end");
+
+        assert!(!error.to_string().is_empty());
+        assert!(std::error::Error::source(&error).is_some());
     }
 }

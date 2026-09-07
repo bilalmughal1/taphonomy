@@ -966,7 +966,7 @@ pub fn enumerate_root<R: EvidenceReader>(
 }
 
 /// Reads one FAT entry, masked to its 28 significant bits.
-fn read_fat_entry<R: EvidenceReader>(
+pub(crate) fn read_fat_entry<R: EvidenceReader>(
     reader: &mut R,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
