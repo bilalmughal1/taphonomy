@@ -635,6 +635,108 @@ fixture_fat32_deleted_residue() {
 }
 
 # ---------------------------------------------------------------------------
+# 17 and 18. FAT32 volumes for recovering a deleted file's data.
+#
+# ADR-0010 Decision H. The deleted fixtures of M6 cannot exercise M7: every
+# deleted file in them occupies exactly one cluster, so there is no run to
+# walk, and mtools allocates forward, so no deleted file's clusters are ever
+# reused and the FAT check has nothing to refuse.
+#
+# BIG.TXT is 1600 bytes, four clusters at this volume's 512-byte cluster
+# size, written before anything else so it takes the first four data
+# clusters. LIVE1.TXT and LIVE2.TXT follow it and are not deleted, so the
+# clusters immediately after the run stay allocated.
+#
+# The content is forty lines of forty bytes. A test asserting a digest must
+# be able to rebuild exactly what was written, and a fixed line width makes
+# the total a property of the loop rather than of the strings.
+# ---------------------------------------------------------------------------
+build_recovery_volume() {
+    local path="$1" label_id="$2"
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: ${label_id}
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work
+    work="$(mktemp -d)"
+
+    local i
+    : > "$work/big.txt"
+    for i in $(seq 1 40); do
+        printf 'taphonomy multicluster fixture line %03d\n' "$i" >> "$work/big.txt"
+    done
+
+    printf 'taphonomy first live fixture\n'  > "$work/live1.txt"
+    printf 'taphonomy second live fixture\n' > "$work/live2.txt"
+    printf 'taphonomy single cluster fix\n'  > "$work/small.txt"
+
+    local img="${path}@@${VBR_OFFSET}"
+
+    # Order fixes the layout. mtools allocates forward from the first free
+    # cluster, so these take clusters 3 to 6, then 7, then 8, then 9, then
+    # 10 for the directory.
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/big.txt"   ::/BIG.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/live1.txt" ::/LIVE1.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/live2.txt" ::/LIVE2.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/small.txt" ::/SMALL.TXT
+    MTOOLS_SKIP_CHECK=1 mmd   -i "$img" ::/gone
+
+    # Nothing is written after these, so no slot and no cluster is reused.
+    # The three deleted entries keep the slots they were given.
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/BIG.TXT
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/SMALL.TXT
+    MTOOLS_SKIP_CHECK=1 mrd  -i "$img" ::/gone
+
+    rm -rf "$work"
+}
+
+fixture_fat32_recover_run() {
+    local path="$OUT_DIR/fat32-recover-run.img"
+    printf 'fat32-recover-run.img\n'
+
+    build_recovery_volume "$path" 0xfa730009
+
+    note "a four-cluster deleted file with its run intact, and a live tail"
+}
+
+fixture_fat32_recover_collision() {
+    local path="$OUT_DIR/fat32-recover-collision.img"
+    printf 'fat32-recover-collision.img\n'
+
+    build_recovery_volume "$path" 0xfa73000a
+
+    # One field. BIG.TXT's DIR_FileSize goes from 1600 to 2560, so the run it
+    # implies grows from four clusters to five and reaches cluster 7, which
+    # LIVE1.TXT holds. That is the shape a volume takes when a deleted file's
+    # clusters have been reused, and mtools cannot produce it: it allocates
+    # forward and never reissues a freed cluster.
+    #
+    # ADR-0006 section 5.1 permits deliberate corruption of one field in an
+    # otherwise valid image. Every other byte here was written by mkfs.vfat,
+    # mcopy, mmd, mdel and mrd.
+    #
+    # Slot 0 is the volume label and slot 1 is BIG.TXT, which needs no
+    # long-name set. DIR_FileSize is the last four bytes of the entry.
+    local root offset
+    root="$(root_dir_offset "$path" "$VBR_OFFSET")"
+    offset=$(( root + 1 * 32 + 28 ))
+    poke_expecting "$path" "$offset"         40 0x00
+    poke_expecting "$path" $(( offset + 1 )) 06 0x0a
+
+    note "the same volume, with one deleted entry's size poked to overlap"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -654,6 +756,8 @@ fixture_fat32_root_entries
 fixture_fat32_root_multicluster
 fixture_fat32_deleted_entries
 fixture_fat32_deleted_residue
+fixture_fat32_recover_run
+fixture_fat32_recover_collision
 
 # ---------------------------------------------------------------------------
 # Manifest
