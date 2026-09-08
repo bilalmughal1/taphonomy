@@ -245,3 +245,24 @@ Revisit if:
 * the RustCrypto license terms change
 * a `std` cryptographic hashing API becomes available
 * NIST vector tests fail after a version update
+
+---
+
+## Appendix A: The project's licence changed (2026-09-07)
+
+§3.4 answers "What is its license?" with `MIT OR Apache-2.0`, and adds that
+this is "Compatible with the project's Apache-2.0 license".
+
+The project's licence is no longer Apache-2.0. ADR-0012 changed it to
+`GPL-3.0-or-later` at `f2a5db2`, before anything was published under the
+previous one.
+
+The conclusion of §3.4 is unaffected and is now load-bearing in a way it was
+not when written. `MIT` and `Apache-2.0` are both compatible with version 3
+of the GPL. `Apache-2.0` is **not** compatible with version 2. Had ADR-0012
+chosen `GPL-2.0`, the dependency this ADR selects could not have been
+combined with the project at all. `-or-later` permits version 3 and later
+and never version 2, so the incompatibility cannot be reached.
+
+The body above is left unmodified. Only the sentence naming the project's
+own licence is wrong, and it was true on 2026-08-30.
