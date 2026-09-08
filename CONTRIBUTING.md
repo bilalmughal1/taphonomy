@@ -13,8 +13,10 @@ this repository.
 
 Taphonomy is authored by Fahad Bilal Saleem.
 
-Contributions, when accepted in future, will be licensed under Apache-2.0 in
-accordance with section 5 of the license, unless separately agreed in writing.
+External contributions are not accepted. The copyright in the whole work is
+held by the author. `docs/decisions/ADR-0012-outbound-licence.md` section 6
+records why that matters and what would have to be in place before it could
+change.
 
 No contribution may add authorship or attribution for an automated tool. See
 `CLAUDE.md` section 0.1.

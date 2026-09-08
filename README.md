@@ -286,7 +286,10 @@ Changes should be focused, tested, documented where required, and reviewed befor
 
 ## License
 
-Taphonomy is distributed under the license specified in `LICENSE`.
+Copyright (c) 2026 Fahad Bilal Saleem.
+
+Taphonomy is distributed under the GNU General Public License, version 3 or
+later. See `LICENSE`.
 
 ## Status Terminology
 
