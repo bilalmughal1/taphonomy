@@ -33,6 +33,7 @@ pub mod fat_recovery;
 pub mod filesystem;
 pub mod hash;
 pub mod partition;
+pub mod validation;
 
 pub use error::Error;
 pub use evidence::EvidenceFile;
