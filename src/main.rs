@@ -18,6 +18,20 @@ use taphonomy::filesystem::{
 };
 use taphonomy::partition::{MbrPartition, PartitionTable, SECTOR_SIZE, parse_mbr};
 
+/// What the operator asked for.
+///
+/// The reporting functions take this rather than a widening list of flags.
+/// `ADR-0013` section 13: a reference digest joins it in M8, and a struct
+/// keeps that from changing four signatures a second time.
+#[derive(Clone, Copy)]
+struct Options {
+    /// Read and hash the content of a deleted file whose run is free.
+    ///
+    /// `ADR-0010` Decision B: opt-in, because the default invocation
+    /// reports what the volume states without reading any content.
+    recover: bool,
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
 
@@ -30,10 +44,10 @@ fn main() -> ExitCode {
     // file's content behind an explicit request; it does not call for an
     // argument parser, and adding a dependency for one boolean would be the
     // largest thing in this crate's tree.
-    let mut recover = false;
+    let mut options = Options { recover: false };
     for arg in args {
         match arg.to_str() {
-            Some("--recover") => recover = true,
+            Some("--recover") => options.recover = true,
             _ => {
                 eprintln!("error: unexpected argument");
                 eprintln!("usage: taphonomy <evidence-image> [--recover]");
@@ -42,7 +56,7 @@ fn main() -> ExitCode {
         }
     }
 
-    match inspect(&path, recover) {
+    match inspect(&path, options) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -51,7 +65,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn inspect(path: &std::ffi::OsStr, recover: bool) -> Result<(), taphonomy::Error> {
+fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Error> {
     let mut evidence = EvidenceFile::open(path)?;
     let reported = evidence.reported_size();
     let result = evidence.digest()?;
@@ -93,7 +107,7 @@ fn inspect(path: &std::ffi::OsStr, recover: bool) -> Result<(), taphonomy::Error
 
                             println!();
                             for p in &partitions {
-                                report_partition(&mut evidence, p, recover);
+                                report_partition(&mut evidence, p, options);
                             }
                         }
                         PartitionTable::GptProtective => {
@@ -123,7 +137,7 @@ fn inspect(path: &std::ffi::OsStr, recover: bool) -> Result<(), taphonomy::Error
 /// A read or identification failure for one partition is reported and does
 /// not stop the others, nor change the process exit code: hashing already
 /// succeeded and that result stands on its own.
-fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, recover: bool) {
+fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, options: Options) {
     let mut vbr = [0u8; VBR_SIZE];
     if let Err(e) = evidence.read_exact_at(p.start_byte(), &mut vbr) {
         eprintln!("error: partition {}: {e}", p.index);
@@ -203,7 +217,7 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, recover: bool
                 }
             }
 
-            report_root_directory(evidence, &boot, extent, recover);
+            report_root_directory(evidence, &boot, extent, options);
         }
         Err(e) => {
             println!("    BOOT SECTOR REJECTED: {e}");
@@ -229,7 +243,7 @@ fn report_root_directory(
     evidence: &mut EvidenceFile,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
-    recover: bool,
+    options: Options,
 ) {
     let root = match enumerate_root(evidence, boot, extent) {
         Ok(root) => root,
@@ -266,8 +280,8 @@ fn report_root_directory(
         }
     }
 
-    report_recovery(evidence, boot, extent, &root.entries, recover);
-    report_recovery(evidence, boot, extent, &root.residue, recover);
+    report_recovery(evidence, boot, extent, &root.entries, options);
+    report_recovery(evidence, boot, extent, &root.residue, options);
 }
 
 /// Reports what the volume says about each deleted entry's content.
@@ -284,7 +298,7 @@ fn report_recovery(
     boot: &Fat32BootSector,
     extent: VolumeExtent,
     entries: &[Entry],
-    recover: bool,
+    options: Options,
 ) {
     let mut heading = false;
     let mut any_free = false;
@@ -339,7 +353,7 @@ fn report_recovery(
                 );
                 println!("        {position:<9} {detail}");
 
-                if recover {
+                if options.recover {
                     match extract(&found, boot, extent, evidence) {
                         Ok(extracted) => {
                             println!(
@@ -368,7 +382,7 @@ fn report_recovery(
     println!("      clusters since deletion. It is not evidence");
     println!("      that the content there is this file's.");
 
-    if !recover {
+    if !options.recover {
         println!("      No content read. Pass --recover to read it.");
     }
 }
