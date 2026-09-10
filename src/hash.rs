@@ -52,6 +52,43 @@ impl Sha256Digest {
         }
         out
     }
+
+    /// Parses a digest from 64 hexadecimal characters.
+    ///
+    /// Upper and lower case are both accepted, because hexadecimal is
+    /// case-insensitive and no misreading is possible. Nothing else is: no
+    /// other length, no surrounding whitespace, no `0x` prefix, and not a
+    /// `sha256sum` line with a filename after the digest. Discarding part
+    /// of what the operator supplied is how a comparison ends up against
+    /// something other than what they meant.
+    ///
+    /// ADR-0013 section 6.1. This reads a recorded digest. It computes
+    /// nothing.
+    pub fn from_hex(text: &str) -> Result<Self, DigestParseError> {
+        let text = text.as_bytes();
+
+        if text.len() != DIGEST_LEN * 2 {
+            return Err(DigestParseError::WrongLength { found: text.len() });
+        }
+
+        let mut bytes = [0u8; DIGEST_LEN];
+        for (index, pair) in text.as_chunks::<2>().0.iter().enumerate() {
+            let mut value = 0u8;
+            for (offset, &byte) in pair.iter().enumerate() {
+                match nibble(byte) {
+                    Some(n) => value = (value << 4) | n,
+                    None => {
+                        return Err(DigestParseError::InvalidCharacter {
+                            position: index * 2 + offset,
+                        });
+                    }
+                }
+            }
+            bytes[index] = value;
+        }
+
+        Ok(Self(bytes))
+    }
 }
 
 impl fmt::Display for Sha256Digest {
@@ -63,6 +100,51 @@ impl fmt::Display for Sha256Digest {
 impl fmt::Debug for Sha256Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Sha256Digest({})", self.to_hex())
+    }
+}
+
+/// A reason a recorded digest could not be read.
+///
+/// ADR-0013 section 6.2. A parse failure has no path, so this is not one of
+/// [`crate::Error`]'s variants, every one of which carries one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DigestParseError {
+    /// The text was not 64 characters long.
+    ///
+    /// `found` is a length in bytes. A digest is ASCII, so for anything
+    /// that could have been one the two are the same number.
+    WrongLength { found: usize },
+    /// A character was not a hexadecimal digit.
+    ///
+    /// `position` is a zero-based byte offset into the text, so that a
+    /// mistyped character in a 64-character string can be found.
+    InvalidCharacter { position: usize },
+}
+
+impl fmt::Display for DigestParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DigestParseError::WrongLength { found } => write!(
+                f,
+                "a sha-256 digest is {} hexadecimal characters, not {found}",
+                DIGEST_LEN * 2
+            ),
+            DigestParseError::InvalidCharacter { position } => {
+                write!(f, "not a hexadecimal character at position {position}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DigestParseError {}
+
+/// The value of one hexadecimal digit, or `None` if it is not one.
+fn nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -216,5 +298,68 @@ mod tests {
             result.digest.to_hex(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn a_digest_round_trips_through_hex() {
+        let digest = Sha256Digest::from_bytes([0xab; DIGEST_LEN]);
+        let parsed = Sha256Digest::from_hex(&digest.to_hex()).expect("parsing to_hex");
+        assert_eq!(parsed, digest);
+    }
+
+    #[test]
+    fn uppercase_hex_parses_to_the_same_digest() {
+        let lower = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let upper = lower.to_ascii_uppercase();
+
+        assert_eq!(
+            Sha256Digest::from_hex(&upper).expect("parsing uppercase"),
+            Sha256Digest::from_hex(lower).expect("parsing lowercase")
+        );
+    }
+
+    #[test]
+    fn a_short_or_long_digest_is_rejected() {
+        let canonical = "ab".repeat(DIGEST_LEN);
+
+        assert_eq!(
+            Sha256Digest::from_hex(&canonical[..canonical.len() - 1]),
+            Err(DigestParseError::WrongLength { found: 63 })
+        );
+        assert_eq!(
+            Sha256Digest::from_hex(&format!("{canonical}a")),
+            Err(DigestParseError::WrongLength { found: 65 })
+        );
+    }
+
+    #[test]
+    fn a_non_hexadecimal_character_is_rejected_with_its_position() {
+        let mut text = "ab".repeat(DIGEST_LEN);
+        text.replace_range(9..10, "g");
+
+        assert_eq!(
+            Sha256Digest::from_hex(&text),
+            Err(DigestParseError::InvalidCharacter { position: 9 })
+        );
+    }
+
+    /// Padding and prefixes are rejected rather than trimmed.
+    #[test]
+    fn whitespace_and_prefixes_are_rejected() {
+        let canonical = "ab".repeat(DIGEST_LEN);
+
+        assert!(Sha256Digest::from_hex(&format!(" {canonical}")).is_err());
+        assert!(Sha256Digest::from_hex(&format!("{canonical}\n")).is_err());
+        assert!(Sha256Digest::from_hex(&format!("0x{canonical}")).is_err());
+    }
+
+    /// A pasted `sha256sum` line is rejected rather than truncated to its
+    /// digest, which would compare against a value the operator did not
+    /// check.
+    #[test]
+    fn a_sha256sum_line_is_rejected() {
+        let line = format!("{}  evidence.img", "ab".repeat(DIGEST_LEN));
+
+        assert!(Sha256Digest::from_hex(&line).is_err());
     }
 }
