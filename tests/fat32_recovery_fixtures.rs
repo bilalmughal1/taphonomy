@@ -14,6 +14,10 @@
 //! `cluster_offset` and `fat_entry_offset` compute, and compare a digest of
 //! what was extracted against a digest of what the generator wrote.
 //!
+//! The validation tests compare against the reference digest recorded in
+//! `ADR-0013` section 16.1, which is text in a document rather than a value
+//! this crate computes.
+//!
 //! `fixture` and `open_volume` are duplicated from
 //! `tests/fat32_directory_fixtures.rs`. Each file under `tests/` compiles as
 //! its own crate and cannot see the other's items.
@@ -27,6 +31,7 @@ use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{VBR_SIZE, VolumeExtent};
 use taphonomy::hash::{Sha256Digest, hash_reader};
 use taphonomy::partition::{PartitionTable, SECTOR_SIZE, parse_mbr};
+use taphonomy::validation::{Outcome, validate};
 
 /// Cluster size of both fixtures used here, in bytes.
 ///
@@ -41,6 +46,13 @@ const BIG_SIZE: u32 = 1600;
 ///
 /// Five clusters rather than four, so the implied run reaches cluster 7.
 const POKED_SIZE: u32 = 2560;
+
+/// `BIG.TXT`'s content digest, as recorded in `ADR-0013` section 16.1.
+///
+/// Written out rather than computed, so that a test compares the value the
+/// record commits to against one derived from the generator's bytes. A test
+/// that computed both sides would only agree with itself.
+const BIG_DIGEST_HEX: &str = "5ecddc870bcf7d8525574328f548af954ac1ab8d1d56555b40d01d2977a21a91";
 
 fn fixture(name: &str) -> PathBuf {
     let path = Path::new("fixtures/partition").join(name);
@@ -373,4 +385,83 @@ fn extraction_is_deterministic() {
     let second = extract(&found, &boot, extent, &mut evidence).expect("second extraction");
 
     assert_eq!(first, second);
+}
+
+/// `ADR-0013` section 16.1. The digest the record commits to is the digest
+/// of the bytes the generator wrote, reached by two independent routes:
+/// parsed from the recorded text, and computed from the content.
+#[test]
+fn the_recorded_reference_digest_is_the_generators_content() {
+    let recorded = Sha256Digest::from_hex(BIG_DIGEST_HEX).expect("the recorded digest parses");
+
+    assert_eq!(recorded, digest_of(&big_content()));
+    assert_eq!(recorded.to_hex(), BIG_DIGEST_HEX);
+}
+
+/// The milestone's assertion. An extraction whose digest equals a reference
+/// the operator supplied is byte for byte that file, which is the only
+/// evidence available that the run read was the file's clusters.
+#[test]
+fn a_recovered_run_matches_the_reference_digest() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-recover-run.img");
+
+    let Some(Assessment::Recoverable(found)) =
+        assess(&entries[1], &boot, extent, &mut evidence).expect("reading the FAT")
+    else {
+        panic!("slot 1 should be recoverable");
+    };
+
+    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let reference = Sha256Digest::from_hex(BIG_DIGEST_HEX).expect("the recorded digest parses");
+
+    let validation = validate(extracted.digest, extracted.bytes_hashed, Some(reference));
+
+    assert_eq!(validation.outcome, Outcome::Match);
+    assert_eq!(validation.covers, u64::from(BIG_SIZE));
+    assert_eq!(validation.reference, Some(reference));
+}
+
+/// One character is enough. `ADR-0013` Decision E: the outcome is that they
+/// differ, and which of the four possible causes produced it is not decided
+/// here or anywhere else in the tool.
+#[test]
+fn a_reference_differing_in_one_character_does_not_match() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-recover-run.img");
+
+    let Some(Assessment::Recoverable(found)) =
+        assess(&entries[1], &boot, extent, &mut evidence).expect("reading the FAT")
+    else {
+        panic!("slot 1 should be recoverable");
+    };
+
+    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+
+    let mut text = BIG_DIGEST_HEX.to_string();
+    text.replace_range(63.., "2");
+    let reference = Sha256Digest::from_hex(&text).expect("still 64 hex characters");
+
+    let validation = validate(extracted.digest, extracted.bytes_hashed, Some(reference));
+
+    assert_ne!(reference, extracted.digest, "the premise of this test");
+    assert_eq!(validation.outcome, Outcome::Differs);
+    assert_eq!(validation.covers, u64::from(BIG_SIZE));
+}
+
+/// A reference cannot induce an extraction the FAT forbids. The collision
+/// fixture's run is refused before content is read, so there is no
+/// extraction to validate: `ADR-0003` section 3.1 makes validation
+/// something that happens to a Candidate, and a refused run never becomes
+/// one.
+#[test]
+fn a_refused_run_offers_nothing_to_validate() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-recover-collision.img");
+
+    let assessment = assess(&entries[1], &boot, extent, &mut evidence)
+        .expect("reading the FAT")
+        .expect("slot 1 is a deleted file");
+
+    assert!(
+        !matches!(assessment, Assessment::Recoverable(_)),
+        "cluster 7 is in use, so no run is offered: {assessment:?}"
+    );
 }
