@@ -8,6 +8,7 @@
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
+use taphonomy::Sha256Digest;
 use taphonomy::fat_directory::{
     DeletedKind, Entry, EntryKind, FirstByte, associate, enumerate_root, recovered_name,
 };
@@ -17,12 +18,15 @@ use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
 };
 use taphonomy::partition::{MbrPartition, PartitionTable, SECTOR_SIZE, parse_mbr};
+use taphonomy::validation::{Outcome, validate};
+
+/// One line of usage, printed on any argument error.
+const USAGE: &str = "usage: taphonomy <evidence-image> [--recover] [--reference-digest <hex>]";
 
 /// What the operator asked for.
 ///
 /// The reporting functions take this rather than a widening list of flags.
-/// `ADR-0013` section 13: a reference digest joins it in M8, and a struct
-/// keeps that from changing four signatures a second time.
+/// `ADR-0013` section 13.
 #[derive(Clone, Copy)]
 struct Options {
     /// Read and hash the content of a deleted file whose run is free.
@@ -30,30 +34,73 @@ struct Options {
     /// `ADR-0010` Decision B: opt-in, because the default invocation
     /// reports what the volume states without reading any content.
     recover: bool,
+
+    /// Digest of the file the operator is looking for, where they gave one.
+    ///
+    /// `ADR-0013` Decision A: the tool never discovers a reference, and
+    /// this is the only way one enters. Decision H: it is an argument
+    /// error without `recover`, because comparing needs content read.
+    reference: Option<Sha256Digest>,
 }
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
 
     let Some(path) = args.next() else {
-        eprintln!("usage: taphonomy <evidence-image> [--recover]");
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
 
-    // One flag, matched exactly. ADR-0010 Decision B puts reading a deleted
-    // file's content behind an explicit request; it does not call for an
-    // argument parser, and adding a dependency for one boolean would be the
-    // largest thing in this crate's tree.
-    let mut options = Options { recover: false };
-    for arg in args {
+    // Two flags, matched exactly. ADR-0010 Decision B puts reading a deleted
+    // file's content behind an explicit request, and ADR-0013 section 13 sets
+    // the ceiling this reasoning stops at: a third flag, or a flag taking
+    // more than one value, is where an argument parser is reconsidered.
+    let mut options = Options {
+        recover: false,
+        reference: None,
+    };
+    while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--recover") => options.recover = true,
+            Some("--reference-digest") => {
+                let Some(value) = args.next() else {
+                    eprintln!("error: --reference-digest requires a digest");
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                };
+
+                // ADR-0013 section 6.1. A digest that cannot be read stops
+                // the run before any evidence is opened, which is the one
+                // thing M8 fails closed on.
+                match value.to_str().map(Sha256Digest::from_hex) {
+                    Some(Ok(digest)) => options.reference = Some(digest),
+                    Some(Err(e)) => {
+                        eprintln!("error: --reference-digest: {e}");
+                        eprintln!("{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    None => {
+                        eprintln!("error: --reference-digest is not valid utf-8");
+                        eprintln!("{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             _ => {
                 eprintln!("error: unexpected argument");
-                eprintln!("usage: taphonomy <evidence-image> [--recover]");
+                eprintln!("{USAGE}");
                 return ExitCode::from(2);
             }
         }
+    }
+
+    // ADR-0013 Decision H. A reference is useless without content to
+    // compare, and implying --recover would enable reading a deleted file's
+    // content without the operator asking for it.
+    if options.reference.is_some() && !options.recover {
+        eprintln!("error: --reference-digest needs --recover, which reads content");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
     }
 
     match inspect(&path, options) {
@@ -302,6 +349,8 @@ fn report_recovery(
 ) {
     let mut heading = false;
     let mut any_free = false;
+    let mut any_match = false;
+    let mut any_differs = false;
 
     let head = |heading: &mut bool| {
         if !*heading {
@@ -356,10 +405,40 @@ fn report_recovery(
                 if options.recover {
                     match extract(&found, boot, extent, evidence) {
                         Ok(extracted) => {
+                            // `docs/SAFETY.md` section 10 requires the
+                            // recovered-file hash and the validation hash to
+                            // be distinguishable where both are reported.
                             println!(
-                                "        {:<9} sha256 {} over {} bytes",
+                                "        {:<9} recovered sha256 {} over {} bytes",
                                 "", extracted.digest, extracted.bytes_hashed
                             );
+
+                            let validation = validate(
+                                extracted.digest,
+                                extracted.bytes_hashed,
+                                options.reference,
+                            );
+
+                            match (validation.outcome, validation.reference) {
+                                (Outcome::Match, Some(reference)) => {
+                                    any_match = true;
+                                    println!(
+                                        "        {:<9} reference sha256 {reference} MATCHES",
+                                        ""
+                                    );
+                                }
+                                (Outcome::Differs, Some(reference)) => {
+                                    any_differs = true;
+                                    println!(
+                                        "        {:<9} reference sha256 {reference} DIFFERS",
+                                        ""
+                                    );
+                                }
+                                // NotAttempted carries no reference, and a
+                                // reference is always carried where a
+                                // comparison happened.
+                                _ => {}
+                            }
                         }
                         Err(e) => {
                             println!("        {:<9} NOT EXTRACTED: {e}", "");
@@ -382,8 +461,29 @@ fn report_recovery(
     println!("      clusters since deletion. It is not evidence");
     println!("      that the content there is this file's.");
 
+    // ADR-0013 section 8.2. A match is byte equality with what the operator
+    // supplied, and where the content is not distinctive that is weaker
+    // evidence than it reads as.
+    if any_match {
+        println!("      A match establishes that these bytes are the");
+        println!("      reference's, byte for byte. Where content is not");
+        println!("      distinctive, other clusters could hold the same");
+        println!("      bytes.");
+    }
+
+    // ADR-0013 Decision E. The causes are listed and none is chosen,
+    // because the evidence does not distinguish between them.
+    if any_differs {
+        println!("      A differing digest does not say which of these");
+        println!("      happened: the file was fragmented, clusters of");
+        println!("      the run were reused, the recorded size is wrong,");
+        println!("      or the reference is another file.");
+    }
+
     if !options.recover {
         println!("      No content read. Pass --recover to read it.");
+    } else if options.reference.is_none() {
+        println!("      No reference supplied. Nothing was validated.");
     }
 }
 
