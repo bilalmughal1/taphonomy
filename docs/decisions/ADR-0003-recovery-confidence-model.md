@@ -185,3 +185,75 @@ milestone M9.
 Implementing the enum earlier than M9 would be speculative. The definition
 exists now so that earlier milestones do not encode a conflicting model by
 accident.
+
+---
+
+## Appendix A: Implementation Note Corrected, and §2 Read (2026-09-09)
+
+`ADR-0012` and `ADR-0010` set the pattern this follows: dated records are
+corrected by appendix and never rewritten. Two corrections and one reading,
+recorded on completion of M8 under `ADR-0013`.
+
+### A.1 §8's first sentence is no longer true
+
+§8 states that no part of this model is implemented. That was true when it
+was written. It was already strained by M7, which delivered §3.1's pipeline
+boundary in code — `extract` returns bytes and a digest and classifies
+nothing, so what it produces is a Candidate in this model's sense, and
+`ADR-0010` §3.1 recorded that reading.
+
+M8 falsifies it. `src/validation.rs` is the Validator stage of §3.1: it
+takes a recovered digest and a reference and returns what the comparison
+established.
+
+What remains unimplemented is the taxonomy and the rules built on it. §8's
+second and third sentences are unaffected and still govern: the taxonomy
+becomes binding on the first code that assigns a confidence level, which
+under `ADR-0002` §8 is M9, and implementing the enum earlier would be
+speculative.
+
+The state of this model at M8:
+
+| Section | Subject | State at M8 |
+| --- | --- | --- |
+| §3.1 | Two-stage pipeline | Implemented. `fat_recovery` produces Candidates, `validation` is the Validator. |
+| §3.2 | Six-level taxonomy | Not implemented. No level name appears in `src/` or `tests/`. |
+| §3.3 | Renaming of `HIGH_CONFIDENCE` | Not reached; nothing assigns a level to rename. |
+| §4.1 | Single level | Not reached. |
+| §4.2 | No upgrade without evidence | Applied as a principle, not as code. `ADR-0013` §8.2 applies its mirror to a digest match on non-distinctive content. |
+| §4.3 | Downgrade always permitted | Not reached. |
+| §4.4 | Default on uncertainty | Applied. A missing reference yields `NotAttempted`, which is never read as a pass. |
+| §4.5 | `RECONSTRUCTED` is not an ordering | Not reached. |
+| §4.6 | Hash semantics | Applied. `ADR-0013` Decision D and §8 bound what a match establishes. |
+| §4.7 | Aggregate reporting | Not implemented, and deliberately so. `ADR-0013` Decision I keeps M8 to per-entry reporting. |
+| §5 | Relationship to operation status | Applied. `ADR-0013` §3 relies on it to make a differing digest a finding rather than a failed operation. |
+
+An Artifact, in §3.1's sense, still does not exist. M8 produces the evidence
+a verdict would be computed from and stops there.
+
+### A.2 §2's last paragraph, read
+
+§2 states that a result cannot have an evidence-strength classification
+before validation, because the classification is the validator's output.
+
+Read literally alongside §8, the two cannot both hold once a validator
+exists: if the classification is the validator's output and M8 builds the
+validator, then M8 assigns classifications, and §8's reservation of the
+taxonomy for M9 is broken by the milestone that precedes it.
+
+The reading this project takes, recorded here so M9 does not inherit the
+ambiguity: **the validator produces the evidence a classification is
+computed from, not the name.** §2's purpose is to establish an ordering —
+nothing may be classified before it has been validated — and that ordering
+is what `SECURITY.md` §31 states independently, that validation is required
+before a result is classified as verified. The sentence is about sequence,
+not about which component owns the enum.
+
+`ADR-0013` section 7 records the same reading from the other side and is the
+decision this appendix supports.
+
+### A.3 What this appendix does not change
+
+No decision in this ADR is amended. The taxonomy, its rules, and the
+milestone at which it becomes binding are unchanged. §7's required
+amendments are unaffected.
