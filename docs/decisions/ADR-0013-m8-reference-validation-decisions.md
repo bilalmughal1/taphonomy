@@ -604,3 +604,176 @@ Recorded because this is the same failure as the one corrected by
 `ADR-0010` Appendix A — a count stated rather than counted — and because
 that section of the audit is the part most likely to be quoted into a dated
 record, where the wrong count would have become evidence.
+
+## Appendix C: M8 as built (2026-09-09)
+
+Recorded on completion of the milestone. Basis `4e09a9b`, the last commit
+that changed code. Line references in the body of this record are to
+`16507a0` as its header states, and several have since moved; this appendix
+names a commit wherever it cites a line.
+
+### C.1 A citation in this record is wrong
+
+The Related list cites `PROJECT.md` §6.4, and §5's Decision A says that
+comparing a recovery against itself is "the self-referential evidence
+`PROJECT.md` §6.4 rejects."
+
+§6.4 is Deterministic Behavior. It requires reproducible results given
+identical evidence, configuration and software version, and says nothing
+about the provenance of a reference. No section of `PROJECT.md` states the
+requirement attributed to it here. The attribution was invented and should
+never have entered the record.
+
+Decision A is unchanged. It does not depend on the citation: a reference
+derived from the evidence is the recovery restated, which is circular on
+its own terms, and the network and host-filesystem halves of the reason
+rest on `SAFETY.md` §19, `SECURITY.md` §22 and `CLAUDE.md` §39, all of
+which say what they were cited for. What is withdrawn is the claim that a
+constraining document already required it.
+
+The same misattribution was used in conversation to justify pursuing the
+CFReDS corpus. That work remains worth doing for the reason §5.4 gives —
+ground truth this project did not generate — but it is a judgement this
+project is making, not a requirement it is meeting.
+
+`tests/fat32_recovery_fixtures.rs` cites §6.4 for determinism. That
+citation is correct and predates this milestone.
+
+### C.2 The requirement this record should have cited
+
+`PROJECT.md` §6.5, Verifiable Results, states that recovered artifacts must
+be validated, and that a file being extracted from storage does not by
+itself establish that the file is correct.
+
+That is M8's mandate, stated in a constraining document, and this record
+argued the entire milestone without citing it. It belongs in the Related
+list. It is recorded here rather than inserted there, because this record
+is corrected by appendix and not rewritten.
+
+### C.3 A refinement proposed and withdrawn
+
+After the output was first exercised, a change was proposed: where one
+entry matched the reference, narrow Decision E's four causes for any other
+entry that differed, on the reasoning that the reference is now known to be
+a file present on the volume, so a differing entry must be a different
+file.
+
+Withdrawn on two grounds.
+
+It is false. The same file may have existed twice on the volume and both
+copies been deleted. One copy's run may be contiguous and recover
+correctly while the other was fragmented and does not. The differing entry
+is then the same file, recovered wrongly, and fragmentation remains the
+cause. Every one of the four causes stays live for every entry.
+
+It is also the wrong mechanism. Gating one entry's caveat on another
+entry's outcome makes a per-entry statement depend on a cross-entry
+inference, which is aggregate reasoning. `ADR-0003` §4.7 and Decision I of
+this record reserve that for M9.
+
+Decision E stands as written. Enumerate, never choose.
+
+### C.4 A fourth state, and why it is not a defect
+
+`Outcome` has three variants, but four situations arise where a reference
+was supplied: a comparison that matched, one that differed, no reference at
+all, and a reference supplied against an entry that produced no extraction
+— a refused run, an ineligible entry, a failed assessment or a failed read.
+
+The fourth produces no comparison line. That is not the silence §7 rejects.
+`ADR-0003` §3.1 makes validation something that happens to a Candidate, and
+a run refused before any content is read never becomes one; there is
+nothing to validate and nothing to classify. The per-entry line already
+states that no content was read.
+
+What is genuinely absent is a statement at the end of a run that some
+entries could not be compared, so that an operator asking whether a file is
+present knows the question went unanswered for part of the volume. That is
+a count across a session, which is `ADR-0003` §4.7, which is M9's. It is
+added to the open items rather than built.
+
+### C.5 §16 and §18 disagreed
+
+§16 requires tests that a reference without `--recover` and a malformed
+reference each exit non-zero. §18's commit sequence does not mention them.
+
+They are built, in `tests/cli_arguments.rs`, which is the first suite in
+the tree to run the binary rather than call into the crate. Both ordering
+claims are tested by passing a path that cannot exist, so that an argument
+error rather than a file error is the evidence that the check ran first.
+
+§18 was incomplete, not §16. Recorded so the gap is not read later as work
+that was skipped.
+
+### C.6 The caveat block was printing twice
+
+Measured on `fat32-deleted-residue.img`, which holds a recoverable deleted
+entry past the directory terminator:
+
+```text
+cargo run --quiet -- fixtures/partition/fat32-deleted-residue.img \
+  --recover --reference-digest <64 hex> | grep -c "A free run means"
+2
+```
+
+`report_recovery` printed the caveats itself and is called once for the
+directory's entries and once for its residue. The duplication predates this
+milestone for the free-run paragraph; M8 tripled the block's size, so a run
+could emit twenty-two lines of caveat.
+
+Fixed at `4e09a9b`: `report_recovery` returns a `Caveats` value, the two
+results merge, and `print_caveats` prints once per volume. The measurement
+above then returns `1`, and the two multi-line paragraphs gained a blank
+line between them.
+
+A caveat is not a findings summary, so Decision I is not breached. Each
+paragraph states what a finding does not establish; none counts or
+aggregates findings.
+
+### C.7 External practice, researched after the decisions
+
+Three findings from SWGDE, none of which changed a decision and all of
+which bear on one.
+
+Their position paper on MD5 and SHA-1 describes the purpose of hash lists
+as file identification — scanning a digital object for specific items — and
+names NIST's National Software Reference Library as the example. Decision A
+and §12's behaviour of comparing one reference against every extraction
+were reasoned from first principles here; that practice has a name and this
+is it.
+
+The same paper states that because of known limitations in MD5 and SHA-1,
+only SHA-2 and SHA-3 are appropriate, and recommends transition as tools
+add support. §14 rejected hash-set integration partly because the corpora
+are keyed on algorithms this project does not implement. The better reason
+is that they are keyed on algorithms the field is moving away from.
+
+Their best practices for computer forensic examinations ask that
+conclusions be reported concisely as well as completely. The output this
+milestone produces is complete and is not concise, which is C.6's problem
+stated from outside the project.
+
+### C.8 What M8 does not establish
+
+Validation against a reference detects a wrong recovery only where the
+operator already holds the right answer. In the case where they do not —
+which is the ordinary reason to recover a file — it cannot help.
+
+`CLAUDE.md` §26 requires recovery testing to measure incorrect recovery as
+well as successful recovery. The failure that produces incorrect
+recoveries here is a deleted file that was fragmented, whose clusters have
+since been freed, passing the allocation check and yielding a plausible
+wrong digest. No fixture produces it, none of the eighteen the generator
+builds is fragmented, and `mtools` offers no way to ask for one.
+
+So M8 does not close item 5 of the README's development sequence.
+`KNOWN_ISSUES.md` records what building that fixture requires. This is
+stated here because a record of a validation milestone is exactly where a
+later reader would otherwise assume accuracy had been measured.
+
+### C.9 Open items added by this appendix
+
+1. A run-level statement that some entries could not be compared, per C.4.
+   `ADR-0003` §4.7, deferred to M9.
+2. A fragmented-deleted-file fixture, per C.8, without which `CLAUDE.md`
+   §26 is unmet for the case that matters most.
