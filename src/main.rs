@@ -327,8 +327,40 @@ fn report_root_directory(
         }
     }
 
-    report_recovery(evidence, boot, extent, &root.entries, options);
-    report_recovery(evidence, boot, extent, &root.residue, options);
+    let from_entries = report_recovery(evidence, boot, extent, &root.entries, options);
+    let from_residue = report_recovery(evidence, boot, extent, &root.residue, options);
+
+    print_caveats(from_entries.merge(from_residue), options);
+}
+
+/// Which statements a set of reported entries obliges the tool to make.
+///
+/// `report_recovery` runs once for the directory's entries and once for its
+/// residue, so it returns what it owes rather than printing it. Printing
+/// from both calls said the same thing twice: on
+/// `fat32-deleted-residue.img`, which holds a recoverable deleted entry
+/// past the terminator, the caveat block appeared twice in one run.
+#[derive(Clone, Copy)]
+struct Caveats {
+    /// At least one entry's implied run was free in the FAT.
+    any_free: bool,
+
+    /// At least one extraction matched the operator's reference.
+    any_match: bool,
+
+    /// At least one extraction differed from it.
+    any_differs: bool,
+}
+
+impl Caveats {
+    /// What two sets of entries oblige between them.
+    fn merge(self, other: Self) -> Self {
+        Self {
+            any_free: self.any_free || other.any_free,
+            any_match: self.any_match || other.any_match,
+            any_differs: self.any_differs || other.any_differs,
+        }
+    }
 }
 
 /// Reports what the volume says about each deleted entry's content.
@@ -346,7 +378,7 @@ fn report_recovery(
     extent: VolumeExtent,
     entries: &[Entry],
     options: Options,
-) {
+) -> Caveats {
     let mut heading = false;
     let mut any_free = false;
     let mut any_match = false;
@@ -449,7 +481,21 @@ fn report_recovery(
         }
     }
 
-    if !any_free {
+    Caveats {
+        any_free,
+        any_match,
+        any_differs,
+    }
+}
+
+/// Prints what the reported entries oblige, once per volume.
+///
+/// `ADR-0003` section 4.2 and `ADR-0010` Decision C for the first
+/// paragraph, `ADR-0013` section 8.2 and Decision E for the others. None of
+/// these is a summary of findings, which `ADR-0013` Decision I reserves for
+/// M9: each states what a finding does not establish.
+fn print_caveats(caveats: Caveats, options: Options) {
+    if !caveats.any_free {
         return;
     }
 
@@ -464,7 +510,8 @@ fn report_recovery(
     // ADR-0013 section 8.2. A match is byte equality with what the operator
     // supplied, and where the content is not distinctive that is weaker
     // evidence than it reads as.
-    if any_match {
+    if caveats.any_match {
+        println!();
         println!("      A match establishes that these bytes are the");
         println!("      reference's, byte for byte. Where content is not");
         println!("      distinctive, other clusters could hold the same");
@@ -473,13 +520,16 @@ fn report_recovery(
 
     // ADR-0013 Decision E. The causes are listed and none is chosen,
     // because the evidence does not distinguish between them.
-    if any_differs {
+    if caveats.any_differs {
+        println!();
         println!("      A differing digest does not say which of these");
         println!("      happened: the file was fragmented, clusters of");
         println!("      the run were reused, the recorded size is wrong,");
         println!("      or the reference is another file.");
     }
 
+    // Attached to the paragraph above rather than set apart: each is one
+    // line about the invocation, not a caveat of its own.
     if !options.recover {
         println!("      No content read. Pass --recover to read it.");
     } else if options.reference.is_none() {
