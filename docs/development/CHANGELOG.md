@@ -94,6 +94,32 @@ history.
   single-cluster deleted file, a deleted directory, and a poked size whose
   implied run reaches a cluster a live file holds (ADR-0006 §5.1,
   ADR-0010 §10)
+- Validation of recovered content against a digest the operator supplies,
+  reported as a match or a difference alongside the number of bytes
+  compared (ADR-0002 M8, ADR-0013)
+- `--reference-digest`, accepting 64 hexadecimal characters in either case
+  and rejecting everything else, including a pasted `sha256sum` line whose
+  trailing filename would otherwise be discarded in silence (ADR-0013 §6.1)
+- A reference that cannot be read stopping the run before any evidence is
+  opened, which is the only condition M8 fails closed on (ADR-0013 §3.4)
+- A reference supplied without `--recover` reported as an argument error
+  rather than implying a flag that reads content (ADR-0013 Decision H)
+- A differing digest reported as a finding about the evidence rather than a
+  failed operation, so the run continues and the exit status is zero
+  (ADR-0013 §3)
+- The four conditions a differing digest is consistent with, enumerated
+  without one of them being chosen (ADR-0013 Decision E)
+- The limit of a match stated alongside it: byte equality with what was
+  supplied, which establishes less where the content is not distinctive
+  (ADR-0013 §8.2)
+- `Sha256Digest::from_hex`, which reads a recorded digest and computes none
+  (ADR-0013 §6.2)
+- A `validation` module that compares digests, reads no evidence and names
+  no filesystem structure, keeping validation separate from extraction
+  (`docs/ARCHITECTURE.md` §5.6, ADR-0013 §11)
+- Command-line argument handling covered by tests that run the binary,
+  including that two of its checks precede opening the evidence
+  (ADR-0013 §16)
 
 ### Changed
 
@@ -109,3 +135,11 @@ history.
 - The in-memory `EvidenceReader` test double moved from `fat_directory.rs`
   into `evidence.rs`, where the trait it implements is declared, so both
   test modules share one rather than duplicating it (ADR-0010 Appendix C)
+- The recovery digest line is labelled `recovered` and the comparison line
+  `reference`, so the recovered-file hash and the validation hash are
+  distinguishable wherever both appear (`docs/SAFETY.md` §10)
+- Recovery caveats print once per volume rather than once per set of
+  entries. On a volume holding a recoverable deleted entry past the
+  directory terminator they previously appeared twice in one run
+- The reporting functions take an options struct rather than a widening
+  list of flags (ADR-0013 §13)

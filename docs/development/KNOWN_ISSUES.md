@@ -91,3 +91,56 @@ The fix is to move both into `src/fat.rs`, which is BIOS parameter block
 parsing and variant determination and today holds no FAT-table access at
 all. The trigger is a third caller, or any change that touches
 `fat_directory.rs`'s FAT handling for another reason.
+
+---
+
+## No fixture exercises a fragmented deleted file
+
+Deletion zeroes the cluster chain in every FAT, measured in EXP-0003, so
+nothing in the evidence says a deleted file occupied its clusters
+contiguously. The recovery path computes the run the entry implies,
+refuses it where any cluster is in use, and extracts where every cluster
+is free.
+
+The failure that follows is this tool's characteristic false positive: a
+deleted file that was fragmented, whose clusters have since been freed,
+produces a run that passes the allocation check and a digest that is
+plausible and wrong. `UnallocatedRun`'s documentation in
+`src/fat_recovery.rs` names the condition and the CLI states it on every
+run, but nothing measures it.
+
+No fixture produces the case. `scripts/generate-fixtures.sh` builds
+eighteen images and none of them is fragmented, because `mtools` writes a
+small file into contiguous clusters and offers no way to ask otherwise.
+Producing one requires poking an image under ADR-0006 section 5.1: write
+the file, delete it, and rewrite the FAT chain so that its clusters are
+not adjacent.
+
+Until that fixture exists, `CLAUDE.md` section 26's requirement to measure
+incorrect recovery as well as successful recovery is unmet for the case
+that matters most, and item 5 of the README's development sequence stays
+open.
+
+Validation against a reference does not close this. It detects the wrong
+digest only where the operator already holds the right one, which is not
+the case the requirement is about.
+
+---
+
+## The command-line test suite is slow
+
+`tests/cli_arguments.rs` runs the binary rather than calling into the
+crate, because argument handling and exit status are decisions `main`
+makes about `argv` and are not reachable from the library. Three of its
+eight tests open a fixture, and the binary hashes the whole 64 MB image
+before it reports anything, so the suite's wall time is dominated by those
+three. Measured 2026-09-09:
+
+```text
+running 8 tests
+test result: ok. 8 passed; 0 failed; finished in 10.35s
+```
+
+Acceptable at eight tests and not at forty. The fix is either a fixture
+small enough for tests that only need an argument decision, or a way to
+reach those decisions without a whole-image read. Neither is needed yet.

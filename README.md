@@ -9,16 +9,19 @@ The project is designed around evidence preservation, correctness, security, rep
 Taphonomy has a validated read-only evidence layer, reads FAT32 root
 directories, and recovers the data of an unfragmented deleted file.
 Recovered content is extracted to memory and reported as a SHA-256 digest.
-No file is written.
+No file is written. Where the operator supplies a digest of the file they
+are looking for, the recovered digest is compared against it and the result
+reported as a match or a difference.
 
-Milestones M1 to M7 of ADR-0002 §8 are complete: evidence images are
+Milestones M1 to M8 of ADR-0002 §8 are complete: evidence images are
 opened read-only and hashed, MBR partition tables are parsed with every
 declared extent validated against the true evidence size, GPT is detected
 and reported as unsupported, filesystems are identified from volume
 structure, FAT32 boot sectors are parsed and validated against the
 partition extent they occupy, the root directory is enumerated by walking
-its cluster chain, the deleted entries within it are identified, and the
-content of an eligible deleted file is read and hashed.
+its cluster chain, the deleted entries within it are identified, the
+content of an eligible deleted file is read and hashed, and that digest is
+compared against a reference the operator supplies.
 
 A deleted entry is reported with whatever fields deletion left intact.
 Where a long-name entry survives alongside it, the first character of its
@@ -35,15 +38,33 @@ clusters since the deletion, which is not evidence that the content there
 is the file's, and the tool says so rather than leaving it to be inferred.
 Reading the content requires `--recover`.
 
+A digest on its own says only what was read. Comparing it against a
+reference the operator holds is the only evidence available that the run
+read was the file's clusters, and it is evidence about that one recovery
+rather than about the assumption in general. Where the content is not
+distinctive, a match establishes less than it appears to, and the tool says
+so. Where the digests differ, the four conditions that could have caused it
+are listed and none is chosen. The tool never looks a reference up: it
+compares against what it was given, and reports that nothing was validated
+when it was given nothing. See
+`docs/decisions/ADR-0013-m8-reference-validation-decisions.md`.
+
 The initial development sequence is:
 
 1. ~~Establish project, safety, security, and architecture contracts.~~ Done.
 2. ~~Build a read-only evidence abstraction.~~ Done.
 3. ~~Build a synthetic evidence laboratory.~~ Done.
-4. Implement one narrowly defined recovery capability.
+4. ~~Implement one narrowly defined recovery capability.~~ Done.
 5. Validate recovery accuracy, including false positives.
 6. Add regression, property, integration, and fuzz testing where appropriate.
 7. Expand recovery capabilities based on research and measured results.
+
+Item 5 is not complete. A recovery can now be validated against a reference
+the operator holds, and the differing case is tested, but the failure that
+matters most is unmeasured: a deleted file that was fragmented, whose
+clusters have since been freed, produces a run that passes the allocation
+check and a digest that is plausible and wrong. No fixture produces that
+case. `docs/development/KNOWN_ISSUES.md` records what building one requires.
 
 ## Initial Recovery Scope
 

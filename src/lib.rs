@@ -2,13 +2,14 @@
 //!
 //! # Status
 //!
-//! Milestones M1 to M7 of ADR-0002 section 8. Taphonomy can open a RAW
+//! Milestones M1 to M8 of ADR-0002 section 8. Taphonomy can open a RAW
 //! evidence image read-only and hash it, parse an MBR partition table,
 //! identify the filesystem in a partition from its own structure, validate
 //! a FAT32 boot sector against the extent it occupies, enumerate the root
 //! directory by walking its cluster chain, identify the deleted entries in
-//! it, including those beyond the terminator, and recover the data of an
-//! unfragmented deleted file.
+//! it, including those beyond the terminator, recover the data of an
+//! unfragmented deleted file, and validate that data against a reference
+//! digest the operator supplies.
 //!
 //! Recovery extracts to memory and reports a digest. No file is written:
 //! ADR-0010 Decision A. Deletion zeroes the cluster chain, so nothing in
@@ -16,6 +17,13 @@
 //! its entry implies is checked against the active FAT and refused where
 //! any cluster in it is in use. A run of free clusters is the absence of
 //! contrary evidence and is not treated as more than that.
+//!
+//! A digest match against a reference is the only evidence available that
+//! the run read was the file's clusters, and it is evidence about that one
+//! recovery rather than about the assumption: ADR-0013 section 8. A
+//! reference is supplied by the operator and never discovered. Where none
+//! is supplied nothing is validated, which is reported rather than left as
+//! a silence.
 //!
 //! A deleted entry's long name is not decoded.
 //!
