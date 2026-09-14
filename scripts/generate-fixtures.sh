@@ -13,7 +13,9 @@
 #   sgdisk                  gdisk
 #   mkfs.vfat               dosfstools
 #   mcopy, mmd, mdel, mrd   mtools
+#   minfo, mshowfat         mtools
 #   od, sha256sum           coreutils
+#   truncate, tr            coreutils
 #
 # No root privileges are required. No loop devices are used. No filesystem is
 # mounted. Every image is a regular file.
@@ -58,8 +60,12 @@ require mcopy "apt install mtools"
 require mmd "apt install mtools"
 require mdel "apt install mtools"
 require mrd "apt install mtools"
+require minfo "apt install mtools"
+require mshowfat "apt install mtools"
 require sha256sum coreutils
 require od coreutils
+require truncate coreutils
+require tr coreutils
 
 mkdir -p "$OUT_DIR"
 
@@ -737,6 +743,105 @@ fixture_fat32_recover_collision() {
 }
 
 # ---------------------------------------------------------------------------
+# 19. FAT32 volume holding a deleted file whose clusters were not adjacent.
+#
+#     The tool's characteristic false positive. FAT32 deletion zeroes the
+#     cluster chain (EXP-0003), so a deleted entry states only a first
+#     cluster and a size, and the run it implies is a contiguous assumption.
+#     Where the file was fragmented and the clusters between its fragments
+#     have since been freed, that run reads as entirely free and extraction
+#     yields a plausible wrong digest. Nothing in the evidence records that
+#     the file was ever fragmented.
+#
+#     EXP-0004 measured how to produce this with mtools alone. mtools starts
+#     each free-cluster search from the FAT32 FSINFO next-free hint, so a
+#     cluster freed behind that hint is not reissued until the search wraps.
+#     Freeing a gap therefore achieves nothing; the volume must be filled so
+#     that scattered single clusters are the only space left, at which point
+#     a three-cluster file has no contiguous option.
+#
+#     No byte of this image is written by this project. ADR-0006 section 5.1
+#     rejects hand-built structure, and no poke is needed here.
+# ---------------------------------------------------------------------------
+fixture_fat32_fragmented_deleted() {
+    local path="$OUT_DIR/fat32-fragmented-deleted.img"
+    printf 'fat32-fragmented-deleted.img\n'
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa73000b
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work img i j free_clusters chain
+    work="$(mktemp -d)"
+    img="${path}@@${VBR_OFFSET}"
+
+    # Seven single-cluster files take clusters 3 to 9 in order. Every line
+    # names the file it belongs to, so a recovered cluster can be traced to
+    # its source by reading it.
+    for i in 0 1 2 3 4 5 6; do
+        : > "$work/s$i.bin"
+        for j in $(seq 0 19); do
+            printf 'taphonomy spacer%d block %06d\n' "$i" "$j" >> "$work/s$i.bin"
+        done
+        truncate -s 512 "$work/s$i.bin"
+        MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/s$i.bin" "::/S$i.BIN"
+    done
+
+    # Fill every remaining cluster so the next allocation search must wrap.
+    # minfo reports the count as a plain integer; mdir reports free space in
+    # locale-formatted digit groups, which would make generation depend on
+    # the generating machine's locale.
+    free_clusters="$(MTOOLS_SKIP_CHECK=1 minfo -i "$img" |
+        sed -n 's/^free clusters=//p')"
+    head -c $(( free_clusters * SECTOR )) /dev/zero |
+        tr '\0' 'F' > "$work/filler.bin"
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/filler.bin" ::/FILLER.BIN
+
+    # Free clusters 4, 6 and 8, leaving no two of them adjacent.
+    for i in 1 3 5; do
+        MTOOLS_SKIP_CHECK=1 mdel -i "$img" "::/S$i.BIN"
+    done
+
+    : > "$work/frag.bin"
+    for j in $(seq 0 55); do
+        printf 'taphonomy fragment block %06d\n' "$j" >> "$work/frag.bin"
+    done
+    truncate -s 1536 "$work/frag.bin"
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/frag.bin" ::/FRAG.BIN
+
+    # The arrangement is the fixture. A geometry or mkfs.vfat change that
+    # allocated these three clusters contiguously would leave an image that
+    # still passes every structural check and tests nothing, which is
+    # ADR-0008 section 8.1's "proves versus illustrates" problem. Assert it.
+    chain="$(MTOOLS_SKIP_CHECK=1 mshowfat -i "$img" ::/FRAG.BIN)"
+    if [ "$chain" != "::/FRAG.BIN <4> <6> <8>" ]; then
+        printf 'error: FRAG.BIN is not fragmented as expected: %s\n' \
+            "$chain" >&2
+        rm -rf "$work"
+        exit 1
+    fi
+
+    # Free the clusters between the fragments, then the fragmented file. The
+    # run its entry implies now reads as entirely free.
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/S2.BIN
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/S4.BIN
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/FRAG.BIN
+
+    rm -rf "$work"
+
+    note "a deleted file whose clusters were not adjacent, with the"
+    note "clusters between its fragments freed as well"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -758,6 +863,7 @@ fixture_fat32_deleted_entries
 fixture_fat32_deleted_residue
 fixture_fat32_recover_run
 fixture_fat32_recover_collision
+fixture_fat32_fragmented_deleted
 
 # ---------------------------------------------------------------------------
 # Manifest
