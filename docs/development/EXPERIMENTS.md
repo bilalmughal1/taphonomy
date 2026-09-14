@@ -802,3 +802,324 @@ must not be reported as certainty about the name.
 3. Decide the M6 design against these measurements and record it.
 4. Build the M6 fixtures, and confirm the fixture count byte-identical
    across runs under `DEVELOPMENT_ENVIRONMENT.md` §12.
+
+---
+
+## EXP-0004: Producing a fragmented deleted file with mtools alone
+
+**Date:** 2026-09-14
+**Milestone:** M9 (ADR-0002 §8), prerequisite
+**Related:** ADR-0002 §8; ADR-0003 §3.2, §4.7; ADR-0006 §5.1, §5.2, §6;
+ADR-0010 Decisions C and E; ADR-0013 Appendix A, Appendix C.8; EXP-0003;
+`CLAUDE.md` §26; `PROJECT.md` §6.5; `KNOWN_ISSUES.md`
+
+---
+
+### Question
+
+`KNOWN_ISSUES.md` states that no fixture exercises a fragmented deleted
+file, and gives as the reason that `mcopy` writes a small file into
+contiguous clusters and offers no way to ask otherwise. It concludes that
+producing one requires poking an image under ADR-0006 §5.1.
+
+Two questions follow.
+
+1. Can a fragmented deleted file be produced using only `mkfs.vfat`,
+   `mcopy` and `mdel`, with no byte of the image written by this project?
+2. If it can, does the resulting volume produce the tool's characteristic
+   false positive — an implied run that reads as entirely free, and a
+   digest that is plausible and wrong?
+
+### Why it matters
+
+`CLAUDE.md` §26 requires recovery testing to measure incorrect recovery as
+well as successful recovery, and states that a system producing many
+plausible but incorrect files must not be considered accurate. Nothing in
+the tree measures it. ADR-0013 Appendix C.8 records that M8's reference
+validation does not close this, because it detects a wrong recovery only
+where the operator already holds the right answer.
+
+M9 assigns a confidence level. A level assigned over a fixture set in which
+every extraction is correct is a name with no measured failure behind it.
+The fragmented case is the one case where FAT32 retains no evidence of the
+failure: EXP-0003 measured that deletion zeroes the cluster chain, so the
+run is inferred from the first cluster and the size alone, and a run whose
+intervening clusters have since been freed passes the allocation check.
+
+Whether the fixture can be built without poking decides whether this is
+cheap work or a licence-and-provenance problem. ADR-0006 §5.1 rejects
+hand-built structure on the grounds that a fixture encoding this project's
+own reading of the specification fails in the same direction as the parser,
+and the test passes while the code is wrong. A fragmented fixture produced
+by `mtools` is not subject to that objection; one produced by poking a FAT
+chain is.
+
+### Hypothesis
+
+Stated before measuring, and scored below.
+
+1. `mcopy` has no flag requesting fragmentation. Expected true.
+2. Freeing a gap and then writing a file larger than it will fragment that
+   file across the gap and the tail. Expected true, moderate confidence.
+3. If the only free space remaining is scattered single clusters, a
+   multi-cluster file must fragment, because FAT allocation is per cluster
+   and cannot refuse. Expected true, moderate confidence.
+4. A volume built that way, with the fragmented file and the clusters
+   between its fragments all deleted, yields an implied run that reads as
+   entirely free and a digest that differs from the file's own.
+
+### Input
+
+A 64 MiB image matching the geometry of every other fixture in the set:
+131,072 sectors of 512 bytes, one partition at LBA 2048, FAT32 formatted
+over the remainder, one sector per cluster.
+
+Seven single-cluster files `S0.BIN` to `S6.BIN` take clusters 3 to 9. A
+filler file consumes every remaining cluster. `S1.BIN`, `S3.BIN` and
+`S5.BIN` are deleted, freeing clusters 4, 6 and 8. A 1,536-byte file
+`FRAG.BIN` is then written, needing three clusters where only three
+scattered single clusters remain. Finally `S2.BIN` and `S4.BIN` — the
+clusters between the fragments — and `FRAG.BIN` itself are deleted.
+
+Every file's content names the file it belongs to on each line, so a
+recovered cluster can be traced to its source by reading it.
+
+### Environment
+
+Measured off the development machine, in an Ubuntu 24.04 container. Tool
+versions:
+
+```text
+mtools            4.0.43-1build1
+dosfstools        4.2
+sfdisk            util-linux 2.39.3
+```
+
+`mtools` and `dosfstools` are the versions ADR-0006 and EXPERIMENTS.md
+record. `sfdisk` is the same upstream version at a different distribution
+patch level. No Rust toolchain was present, which bounds what this record
+establishes: see Limitations 1.
+
+### Method
+
+`SOURCE_DATE_EPOCH=1577836800`, `TZ=UTC`, `MTOOLS_SKIP_CHECK=1`, as
+ADR-0006 §6 Condition 1 requires.
+
+The number of clusters the filler must consume is read from `minfo`, which
+prints `free clusters=` followed by a plain integer. `mdir` was used first
+and rejected: it reports free space in locale-formatted digit groups, which
+would make fixture generation depend on the generating machine's locale.
+
+The generator was run twice into separate directories and the images
+compared byte for byte, which is the standard `verify-fixtures.sh` applies.
+
+`mshowfat`, which is part of `mtools` and therefore adds no dependency, was
+used to read the cluster chain of `FRAG.BIN` before it was deleted.
+
+### Expected result
+
+Hypothesis 2 predicted fragmentation across the freed gap. Hypothesis 3
+predicted fragmentation under a wrapped allocation search.
+
+### Actual result
+
+**Hypothesis 1 holds.** `mcopy` has no fragmentation option.
+
+**Hypothesis 2 is false.** Writing three files, deleting the middle one to
+free eight clusters, then writing a sixteen-cluster file allocated clusters
+13 to 28 — contiguous, immediately after the surviving file, leaving
+clusters 4 to 11 free and unused.
+
+The mechanism was then measured rather than inferred. `minfo` on that image
+reports:
+
+```text
+free clusters=126987
+last allocated cluster=28
+```
+
+`mtools` maintains the FAT32 FSINFO next-free hint in the image and starts
+each allocation search from it, so a cluster freed behind the hint is not
+reissued until the search wraps. The claim in `KNOWN_ISSUES.md` is
+therefore correct for the case it describes, and correct for the wrong
+reason: the obstacle is not that `mcopy` writes small files contiguously,
+it is that the free-cluster search does not go backwards.
+
+**Hypothesis 3 holds.** With the tail exhausted and only clusters 4, 6 and
+8 free, `mcopy` wrote a three-cluster file across all three. `mshowfat`
+reports:
+
+```text
+::/FRAG.BIN <4> <6> <8>
+```
+
+**Hypothesis 4 holds.** After deleting `S2.BIN`, `S4.BIN` and `FRAG.BIN`,
+the FAT entries for clusters 4 to 8 are all zero, so nothing records that
+the file was ever fragmented. `FRAG.BIN`'s directory entry survives with a
+first cluster of 4 and a size of 1,536, which implies the contiguous run 4
+to 6. Every cluster of that run reads as free.
+
+The three clusters of that implied run hold, in order, the first third of
+`FRAG.BIN`, the whole of the deleted `S2.BIN`, and the second third of
+`FRAG.BIN`. Read as text, cluster 5 begins:
+
+```text
+taphonomy spacer2 block 000000
+```
+
+The remaining third of `FRAG.BIN` sits in cluster 8, which the deleted
+`S5.BIN` entry names as its own first cluster.
+
+**Determinism.** Two independent runs produced byte-identical images.
+
+```text
+52d92a825c375c2f296b6ee7ab5b6787ea801accfd3634f87d750139006dac20
+```
+
+**Digests.**
+
+| Object | SHA-256 |
+| --- | --- |
+| `fat32-fragmented-deleted.img` | `52d92a825c375c2f296b6ee7ab5b6787ea801accfd3634f87d750139006dac20` |
+| `FRAG.BIN` content, as written | `a27a7e9556749147a521e0f133a9a1a84375861885f883b404c125f4719f3bfd` |
+| Clusters 4, 5 and 6, first 1,536 bytes | `7eef746ae1c9b211bf0384deec32abf8f91eb024f49c59f8478bc617db342914` |
+
+The second and third differ. That difference is the measurement `CLAUDE.md`
+§26 asks for and the tree has never made.
+
+**Build cost.** 0.70 seconds against 0.22 for a volume with no filler. The
+image is not sparse, so it occupies 64 MiB on disk where the existing
+fixtures occupy far less.
+
+### Conclusion
+
+A fragmented deleted file can be produced with `mkfs.vfat`, `mcopy` and
+`mdel` alone. No byte of the image is written by this project, so ADR-0006
+§5.1's objection does not apply and the narrow deliberate-corruption
+exception is not needed.
+
+The route is not the obvious one. Freeing a gap achieves nothing because
+the FSINFO next-free hint does not search backwards. The volume must be
+filled so that the search wraps, at which point scattered single clusters
+are the only space available and a multi-cluster file has no contiguous
+option.
+
+`KNOWN_ISSUES.md`'s statement that producing such a fixture requires poking
+an image under ADR-0006 §5.1 is superseded by this measurement. A comment
+in `scripts/generate-fixtures.sh` above `fixture_fat32_recover_collision`
+states that `mtools` allocates forward and never reissues a freed cluster.
+That is true only while the search has not wrapped, and the general form of
+the claim is false. Whether the collision fixture could now be built
+without its poke is a separate question and is not answered here.
+
+### Limitations
+
+1. **The recovered digest is predicted, not measured.** No Rust toolchain
+   was available in the measuring environment, so the tool was not run
+   against this image. `7eef746a…` is the digest of the first 1,536 bytes
+   of clusters 4, 5 and 6, computed independently. It is what `extract` is
+   expected to produce given `assess` classifies the run as recoverable,
+   read from `src/fat_recovery.rs` at `4adfda3`. Confirming it against the
+   binary is the first item under Next action, and until that is done this
+   record predicts the tool's behaviour rather than reporting it.
+
+2. **Cross-machine determinism is unverified.** Two runs on one machine
+   produced identical images. Whether the same procedure produces the same
+   digest on the development machine has not been measured, and the
+   `sfdisk` patch level differs. `verify-fixtures.sh` measures determinism
+   within a machine and not across machines, so the image digest above may
+   not reproduce and must be re-measured before anything asserts it.
+
+3. **One arrangement, not a class.** This is a single fragmented file with
+   one deleted single-cluster file between two of its fragments. It is
+   Case 3 of the canonical list in the external work cited below. Cases
+   where an active file sits between fragments, where a file wraps from
+   the end of the volume to the beginning, and where fragments are out of
+   logical order are not built here.
+
+4. **The filler is a single repeated byte.** Its content is never
+   recovered because it stays allocated, but a fixture whose bulk is
+   uniform will not reveal a fault that depends on distinguishing filler
+   clusters from one another.
+
+5. **The fixture depends on exhausting the volume.** Anything that changes
+   the geometry, the cluster size or `mkfs.vfat`'s layout changes how many
+   clusters the filler must consume, and the arrangement must be
+   re-verified with `mshowfat` rather than assumed.
+
+### External practice
+
+Researched after the measurements, and consulted in the published sources
+rather than through a summary.
+
+NIST's CFTT *Active File Identification & Deleted File Recovery Tool
+Specification*, Draft 1 of Version 1.1, defines the requirement this case
+breaches. It is not a core feature. `DFR-CR-04` requires a Recovered Object
+to consist only of blocks from the Deleted Block Pool, and the
+specification defines that pool as blocks that were part of an FS-Object,
+were deleted, and have not been reallocated or reused. Cluster 5 satisfies
+all three, so it is in the pool and `DFR-CR-04` is not breached.
+
+The requirements that are breached sit in the optional section, which
+applies because the specification's definition of Estimated Content covers
+what this tool does — recovering beyond what residual metadata explicitly
+identifies, as ADR-0013 Appendix A already records:
+
+* `DFR-RO-05` requires that estimated content consist only of blocks
+  allocated to the original object. Cluster 5 never was.
+* `DFR-RO-04` requires that each recovered block be assigned to no more
+  than one Recovered Object. In this fixture cluster 5 falls in the implied
+  run of the fragmented entry and is also the whole of another deleted
+  entry's run, and cluster 6 likewise.
+* `DFR-RO-08` requires that estimated content replace blocks allocated
+  since deletion with benign data of the same length. ADR-0010 Decision C
+  refuses instead. That is a third deliberate non-conformance, distinct
+  from the `DFR-CR-02` one recorded in ADR-0013 Appendix A.
+
+The specification's scope also bears on the method. It restricts testing to
+files created and deleted as an end user would, and excludes file system
+metadata specifically corrupted, modified or otherwise manipulated. The
+allocation-pressure method satisfies that. `mtools` ships `mdoctorfat`,
+which changes the clusters allocated to a file and performs no consistency
+check, and which would have produced this fixture in one command; it is
+excluded by the specification's scope for the same reason ADR-0006 §5.1
+excludes it.
+
+Meyer and Roy, *Do Metadata-based Deleted-File-Recovery (DFR) Tools Meet
+NIST Guidelines?*, EAI Endorsed Transactions on Security and Safety, 2020,
+build a canonical list of test images in which this arrangement is Case 3.
+They report that where the space between fragments is unallocated, every
+tool they tested recovered the file as though it were contiguous and pulled
+in data that was not the file's: Autopsy, Recuva, FTK Imager, TestDisk and
+Magnet AXIOM. Two points follow. This failure is the field's, not this
+project's alone, and M9 must not claim more about a recovery than tools
+that all fail here. And their attribution of the failure to core feature 4
+does not survive the specification's own definition of the Deleted Block
+Pool, which is why `DFR-RO-05` is cited above instead.
+
+Their Case 2, an active file between the fragments, corroborates ADR-0010
+Decision C from the other side: Recuva and Magnet AXIOM fail because they
+do not refuse on an allocated cluster, and this tool does refuse.
+
+Their images were built on a mounted filesystem, where Linux rescans the
+FAT rather than trusting FSINFO, which is why the simple gap method works
+there. ADR-0006 §5.2 rejects mounting, so that route is not open here and
+the wrap is required.
+
+### Next action
+
+1. Run the tool against the fixture on the development machine and compare
+   the reported digest against `7eef746a…`. Score Limitation 1.
+2. Re-measure the image digest on the development machine and record
+   whether it matches `52d92a82…`. Score Limitation 2.
+3. Add the fixture to `scripts/generate-fixtures.sh`, with disk signature
+   `0xfa73000b`, and to `fixtures/partition/MANIFEST.sha256` as a separate
+   commit.
+4. Add an integration test asserting that the extraction succeeds, that its
+   digest is not `FRAG.BIN`'s, and that the entry reports every cluster
+   free. A test that the tool recovers correctly here would be asserting
+   the wrong thing.
+5. Correct the `KNOWN_ISSUES.md` entry and the
+   `fixture_fat32_recover_collision` comment, each in its own commit.
+6. Decide, in M9, how a confidence level is reported for an entry of this
+   shape, given `DFR-RO-04`, `DFR-RO-05` and `DFR-RO-08`.
