@@ -129,6 +129,7 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
     }
 
     println!();
+    let mut caveats = Caveats::none();
     let mut sector = [0u8; SECTOR_SIZE];
     match evidence.read_exact_at(0, &mut sector) {
         Ok(()) => {
@@ -154,7 +155,8 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
 
                             println!();
                             for p in &partitions {
-                                report_partition(&mut evidence, p, options);
+                                caveats =
+                                    caveats.merge(report_partition(&mut evidence, p, options));
                             }
                         }
                         PartitionTable::GptProtective => {
@@ -176,6 +178,8 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
         Err(e) => eprintln!("error: {e}"),
     }
 
+    print_caveats(caveats, options);
+
     Ok(())
 }
 
@@ -184,11 +188,11 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
 /// A read or identification failure for one partition is reported and does
 /// not stop the others, nor change the process exit code: hashing already
 /// succeeded and that result stands on its own.
-fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, options: Options) {
+fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, options: Options) -> Caveats {
     let mut vbr = [0u8; VBR_SIZE];
     if let Err(e) = evidence.read_exact_at(p.start_byte(), &mut vbr) {
         eprintln!("error: partition {}: {e}", p.index);
-        return;
+        return Caveats::none();
     }
 
     let id = identify(&vbr);
@@ -231,7 +235,7 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, options: Opti
     }
 
     if id.filesystem() != Some(Filesystem::Fat32) {
-        return;
+        return Caveats::none();
     }
 
     let extent = VolumeExtent {
@@ -264,10 +268,11 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, options: Opti
                 }
             }
 
-            report_root_directory(evidence, &boot, extent, options);
+            report_root_directory(evidence, &boot, extent, options)
         }
         Err(e) => {
             println!("    BOOT SECTOR REJECTED: {e}");
+            Caveats::none()
         }
     }
 }
@@ -291,12 +296,12 @@ fn report_root_directory(
     boot: &Fat32BootSector,
     extent: VolumeExtent,
     options: Options,
-) {
+) -> Caveats {
     let root = match enumerate_root(evidence, boot, extent) {
         Ok(root) => root,
         Err(e) => {
             println!("    ROOT DIRECTORY NOT ENUMERATED: {e}");
-            return;
+            return Caveats::none();
         }
     };
 
@@ -330,7 +335,7 @@ fn report_root_directory(
     let from_entries = report_recovery(evidence, boot, extent, &root.entries, options);
     let from_residue = report_recovery(evidence, boot, extent, &root.residue, options);
 
-    print_caveats(from_entries.merge(from_residue), options);
+    from_entries.merge(from_residue)
 }
 
 /// Which statements a set of reported entries obliges the tool to make.
@@ -353,6 +358,16 @@ struct Caveats {
 }
 
 impl Caveats {
+    /// Nothing owed. The value a path that reported no deleted content
+    /// returns, so that the early exits do not each repeat a literal.
+    const fn none() -> Self {
+        Self {
+            any_free: false,
+            any_match: false,
+            any_differs: false,
+        }
+    }
+
     /// What two sets of entries oblige between them.
     fn merge(self, other: Self) -> Self {
         Self {
@@ -494,6 +509,15 @@ fn report_recovery(
 /// paragraph, `ADR-0013` section 8.2 and Decision E for the others. None of
 /// these is a summary of findings, which `ADR-0013` Decision I reserves for
 /// M9: each states what a finding does not establish.
+///
+/// Printed once per run. `ADR-0013` Appendix C.6 made this once per volume
+/// when `report_recovery` printed it directly; `ADR-0003` section 4.7
+/// requires a statement about a session rather than a volume, so the value
+/// now travels to `inspect` and prints there.
+///
+/// Indented to zero for the same reason. At volume indentation it would
+/// read as a statement about the last volume printed rather than about the
+/// run it now covers.
 fn print_caveats(caveats: Caveats, options: Options) {
     if !caveats.any_free {
         return;
@@ -503,37 +527,37 @@ fn print_caveats(caveats: Caveats, options: Options) {
     // is free would let a reader take it for a finding. It is the absence of
     // contrary evidence, which is not the same thing and never becomes it.
     println!();
-    println!("      A free run means nothing has claimed those");
-    println!("      clusters since deletion. It is not evidence");
-    println!("      that the content there is this file's.");
+    println!("A free run means nothing has claimed those");
+    println!("clusters since deletion. It is not evidence");
+    println!("that the content there is this file's.");
 
     // ADR-0013 section 8.2. A match is byte equality with what the operator
     // supplied, and where the content is not distinctive that is weaker
     // evidence than it reads as.
     if caveats.any_match {
         println!();
-        println!("      A match establishes that these bytes are the");
-        println!("      reference's, byte for byte. Where content is not");
-        println!("      distinctive, other clusters could hold the same");
-        println!("      bytes.");
+        println!("A match establishes that these bytes are the");
+        println!("reference's, byte for byte. Where content is not");
+        println!("distinctive, other clusters could hold the same");
+        println!("bytes.");
     }
 
     // ADR-0013 Decision E. The causes are listed and none is chosen,
     // because the evidence does not distinguish between them.
     if caveats.any_differs {
         println!();
-        println!("      A differing digest does not say which of these");
-        println!("      happened: the file was fragmented, clusters of");
-        println!("      the run were reused, the recorded size is wrong,");
-        println!("      or the reference is another file.");
+        println!("A differing digest does not say which of these");
+        println!("happened: the file was fragmented, clusters of");
+        println!("the run were reused, the recorded size is wrong,");
+        println!("or the reference is another file.");
     }
 
     // Attached to the paragraph above rather than set apart: each is one
     // line about the invocation, not a caveat of its own.
     if !options.recover {
-        println!("      No content read. Pass --recover to read it.");
+        println!("No content read. Pass --recover to read it.");
     } else if options.reference.is_none() {
-        println!("      No reference supplied. Nothing was validated.");
+        println!("No reference supplied. Nothing was validated.");
     }
 }
 
