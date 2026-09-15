@@ -94,7 +94,7 @@ all. The trigger is a third caller, or any change that touches
 
 ---
 
-## No fixture exercises a fragmented deleted file
+## Only one fragmentation arrangement is measured
 
 Deletion zeroes the cluster chain in every FAT, measured in EXP-0003, so
 nothing in the evidence says a deleted file occupied its clusters
@@ -105,42 +105,50 @@ is free.
 The failure that follows is this tool's characteristic false positive: a
 deleted file that was fragmented, whose clusters have since been freed,
 produces a run that passes the allocation check and a digest that is
-plausible and wrong. `UnallocatedRun`'s documentation in
-`src/fat_recovery.rs` names the condition and the CLI states it on every
-run, but nothing measures it.
+plausible and wrong.
 
-No fixture produces the case. `scripts/generate-fixtures.sh` builds
-eighteen images and none of them is fragmented, because `mtools` writes a
-small file into contiguous clusters and offers no way to ask otherwise.
-Producing one requires poking an image under ADR-0006 section 5.1: write
-the file, delete it, and rewrite the FAT chain so that its clusters are
-not adjacent.
+That case is now measured. `fat32-fragmented-deleted.img` holds a deleted
+file whose three clusters were not adjacent, with the clusters between its
+fragments freed as well. It is built with `mkfs.vfat`, `mcopy` and `mdel`
+alone, with no poked field, by the technique EXP-0004 records. On it, three
+of the five deleted entries recover content that is not their own file's,
+and the tool reports all five identically: every cluster free, no refusal,
+a digest for each.
 
-Until that fixture exists, `CLAUDE.md` section 26's requirement to measure
-incorrect recovery as well as successful recovery is unmet for the case
-that matters most, and item 5 of the README's development sequence stays
-open.
+What remains open is the rest of the space. NIST's CFTT deleted file
+recovery suite defines seventeen test cases, and this fixture is the
+equivalent of one of them. Unmeasured here: an active file lying between
+the fragments rather than a deleted one, fragments in non-sequential
+order, files of more than two fragments, overwritten files, and large
+files. Until more of those are built, item 5 of the README's development
+sequence stays open.
 
-Validation against a reference does not close this. It detects the wrong
-digest only where the operator already holds the right one, which is not
-the case the requirement is about.
+Validation against a reference does not close the remainder. It detects a
+wrong digest only where the operator already holds the right one, which is
+not the case the requirement is about.
 
 ---
 
-## The command-line test suite is slow
+## Two test suites are dominated by whole-image reads
 
 `tests/cli_arguments.rs` runs the binary rather than calling into the
 crate, because argument handling and exit status are decisions `main`
 makes about `argv` and are not reachable from the library. Three of its
 eight tests open a fixture, and the binary hashes the whole 64 MB image
-before it reports anything, so the suite's wall time is dominated by those
-three. Measured 2026-09-09:
+before it reports anything.
+
+`tests/fat32_recovery_fixtures.rs` is now comparable, and for a different
+reason. It calls into the crate and spawns no process, so the cost is not
+the binary: it is opening 64 MB fixtures. Measured 2026-09-15:
 
 ```text
-running 8 tests
-test result: ok. 8 passed; 0 failed; finished in 10.35s
+tests/cli_arguments.rs           8 tests   9.34s
+tests/fat32_recovery_fixtures.rs 22 tests  8.26s
 ```
 
-Acceptable at eight tests and not at forty. The fix is either a fixture
-small enough for tests that only need an argument decision, or a way to
-reach those decisions without a whole-image read. Neither is needed yet.
+Every other suite in the workspace finishes in under a tenth of a second.
+
+A fixture small enough for tests that only need an argument decision would
+address the first and not the second. Reaching those decisions without a
+whole-image read would address the first only. Neither is needed yet, but
+the entry should not be read as naming a single suite.
