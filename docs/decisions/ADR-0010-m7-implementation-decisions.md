@@ -987,3 +987,99 @@ real type against the real filesystem and is not affected.
 The count criterion is not abandoned. It remains the right default where the
 question it proxies for cannot be answered directly. It was the wrong tool
 for a 45-line implementation of a one-method trait.
+
+---
+
+## Appendix D: §10.2's inference and §11's claim are falsified (2026-09-15)
+
+`EXP-0004` measured `mtools` allocation behaviour beyond what §10.2 and §11
+assumed. Both sections contain a correct measurement and an incorrect
+generalisation drawn from it. The bodies are not rewritten.
+
+### D.1 §10.2's measurement stands and its inference does not
+
+§10.2 reads:
+
+> `mtools` allocates forward. Measured: after four deletions freeing
+> clusters 3, 4, 5 and 6, the next two files written took clusters 9 and
+> 10.
+>
+> A fixture built with `mtools` alone therefore cannot contain a deleted
+> entry whose clusters have been reused, which is the ordinary condition on
+> any volume that has been used since the deletion.
+
+The measurement is correct and reproduces. `EXP-0004` repeated it
+independently: freeing eight clusters and then writing a sixteen-cluster
+file allocated clusters 13 to 28, past the hole entirely.
+
+The second paragraph does not follow. The measurement was taken with free
+space remaining at the tail of the volume. `mtools` starts each free-cluster
+search from the FAT32 FSINFO next-free hint, which it maintains in the
+image, so a cluster freed behind that hint is not reissued *until the
+search wraps*. Fill the volume and the search must wrap, at which point
+freed clusters are the only clusters available and are reused.
+
+`fixtures/partition/fat32-fragmented-deleted.img` is the counterexample and
+is in the tree. Its slots 4 and 6 are deleted entries whose clusters were
+reused — by `FRAG.BIN`, written after they were freed — and no byte of that
+image is written by this project.
+
+The correct statement is narrower: `mtools` does not reissue a freed
+cluster while unallocated space remains ahead of the FSINFO hint.
+
+### D.2 §11's claim is false as stated
+
+§11 justifies the poke in `fixture_fat32_recover_collision` on the ground
+that the measured `mtools` allocation behaviour is why no alternative
+exists here.
+
+An alternative exists and has been measured. Building the fragmented volume
+and stopping one step earlier — deleting the fragmented file but leaving
+the files between its fragments live — produces a deleted entry whose
+implied run reaches a cluster allocated to a live file:
+
+```text
+slot 2  deleted  first=4  size=1536  implied=[4, 5, 6]  allocated=[5]
+```
+
+That is the condition `Assessment::RunBroken` exists to report, reached with
+no poke. Two builds were byte-identical at
+`5f30fc3474f2ae0963ca2ad98c9791a687211997606b493c74ac21ef5078ddda`.
+Recorded in `EXP-0004` Appendix A.5.
+
+### D.3 The poke is nonetheless correct, for a reason §11 does not give
+
+The decision stands. The reasoning is replaced rather than the outcome.
+
+`fat32-recover-collision.img` is not valuable because it exhibits a broken
+run. It is valuable because it exhibits one while differing from
+`fat32-recover-run.img` in exactly one field.
+`the_two_fixtures_differ_only_in_the_declared_size` in
+`tests/fat32_recovery_fixtures.rs` asserts that every other slot is
+byte-identical between the two images, which is what makes the refusal
+attributable to the declared size and to nothing else.
+
+That is a controlled variable, and the unpoked route cannot produce one. The
+image measured in D.2 differs from every other fixture in its disk
+signature, its deletion sequence and its FAT contents simultaneously. A
+refusal observed on it would be attributable to the arrangement as a whole
+and to no single field.
+
+So the poke buys experimental control, not the shape. §11's justification
+is wrong and its conclusion is right, and this fixture should not be
+rebuilt on the strength of `EXP-0004`. A reader who takes D.1 and D.2 alone
+as licence to remove the poke would destroy a test's premise.
+
+### D.4 What this appendix does not change
+
+Decision C stands unaltered: a run reaching an allocated cluster is refused
+and the cluster is named. `EXP-0004` Appendix A.2 measures the case Decision
+C does not cover — a run whose intervening clusters have since been freed,
+which no allocation check can detect — and that is a gap in the evidence
+available to the tool, not a defect in the decision.
+
+`ADR-0006` is unaffected. §5.1's rejection of hand-built structure holds,
+and the construction in `EXP-0004` uses `mkfs.vfat`, `mcopy` and `mdel`
+only, so the narrow deliberate-corruption exception is not engaged by it.
+The poke in `fixture_fat32_recover_collision` continues to rely on that
+exception, as it did before this appendix.
