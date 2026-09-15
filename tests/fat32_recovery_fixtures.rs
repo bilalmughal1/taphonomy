@@ -54,6 +54,22 @@ const POKED_SIZE: u32 = 2560;
 /// that computed both sides would only agree with itself.
 const BIG_DIGEST_HEX: &str = "5ecddc870bcf7d8525574328f548af954ac1ab8d1d56555b40d01d2977a21a91";
 
+/// Size in bytes of `FRAG.BIN`, as its deleted entry still declares it.
+///
+/// Three 512-byte clusters exactly, so the run carries no slack.
+const FRAG_SIZE: u32 = 1536;
+
+/// `FRAG.BIN`'s own content digest, as recorded in `EXP-0004`.
+///
+/// This is what a correct recovery of that entry would produce. The tool
+/// does not produce it, which is the point of the fixture.
+const FRAG_DIGEST_HEX: &str = "a27a7e9556749147a521e0f133a9a1a84375861885f883b404c125f4719f3bfd";
+
+/// The digest the tool actually produces for `FRAG.BIN`'s entry, as
+/// recorded in `EXP-0004`.
+const COMMINGLED_DIGEST_HEX: &str =
+    "7eef746ae1c9b211bf0384deec32abf8f91eb024f49c59f8478bc617db342914";
+
 fn fixture(name: &str) -> PathBuf {
     let path = Path::new("fixtures/partition").join(name);
     assert!(
@@ -106,6 +122,68 @@ fn big_content() -> Vec<u8> {
         out.extend_from_slice(format!("taphonomy multicluster fixture line {i:03}\n").as_bytes());
     }
     out
+}
+
+/// The content the generator wrote to `S<n>.BIN`: twenty tagged lines cut
+/// to one cluster.
+///
+/// Every line names the file it belongs to, so a cluster recovered into the
+/// wrong object can be traced to its source by reading it. NIST's CFTT
+/// requires exactly this of a recovery test image.
+fn spacer_content(n: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    for j in 0..20 {
+        let line = format!("taphonomy spacer{n} block {j:06}\n");
+        out.extend_from_slice(line.as_bytes());
+    }
+    out.truncate(CLUSTER_BYTES);
+    out
+}
+
+/// The content the generator wrote to `FRAG.BIN`: fifty-six tagged lines cut
+/// to three clusters.
+fn frag_content() -> Vec<u8> {
+    let mut out = Vec::new();
+    for j in 0..56 {
+        let line = format!("taphonomy fragment block {j:06}\n");
+        out.extend_from_slice(line.as_bytes());
+    }
+    out.truncate(FRAG_SIZE as usize);
+    out
+}
+
+/// What clusters 4, 5 and 6 hold, in that order.
+///
+/// The first third of `FRAG.BIN`, the whole of the deleted `S2.BIN`, and
+/// the second third of `FRAG.BIN`. This is what the entry's implied run
+/// reads, and it is not any one file's content.
+fn commingled_content() -> Vec<u8> {
+    let frag = frag_content();
+    let mut out = Vec::new();
+    out.extend_from_slice(&frag[..CLUSTER_BYTES]);
+    out.extend_from_slice(&spacer_content(2));
+    out.extend_from_slice(&frag[CLUSTER_BYTES..2 * CLUSTER_BYTES]);
+    out
+}
+
+/// The first cluster and declared size of a deleted short entry.
+///
+/// `EntryKind` is `Clone` and not `Copy`, so this binds the two `u32` fields
+/// and ignores the rest rather than moving out of the entry.
+fn deleted_short(entry: &Entry) -> (u32, u32) {
+    let EntryKind::Deleted {
+        was:
+            DeletedKind::ShortName {
+                first_cluster,
+                file_size,
+                ..
+            },
+    } = entry.kind
+    else {
+        panic!("expected a deleted short entry: {entry:?}");
+    };
+
+    (first_cluster, file_size)
 }
 
 fn digest_of(bytes: &[u8]) -> Sha256Digest {
@@ -463,5 +541,224 @@ fn a_refused_run_offers_nothing_to_validate() {
     assert!(
         !matches!(assessment, Assessment::Recoverable(_)),
         "cluster 7 is in use, so no run is offered: {assessment:?}"
+    );
+}
+
+/// Slot order is fixed by the order the generator invokes `mcopy` and
+/// `mdel`. `FRAG.BIN` occupies the slot `S1.BIN` freed, which is why the
+/// fragmented entry is slot 2 rather than the last.
+///
+/// This test states the premise the six below depend on. If the generator
+/// changes, this fails first and says what moved.
+#[test]
+fn the_fragmented_fixture_has_the_layout_the_generator_built() {
+    let (_evidence, boot, _extent, entries) = entries("fat32-fragmented-deleted.img");
+
+    assert_eq!(boot.geometry.cluster_bytes() as usize, CLUSTER_BYTES);
+    assert_eq!(
+        entries.len(),
+        9,
+        "a volume label, two live files, five deleted files and the filler: {entries:?}"
+    );
+
+    let (first_cluster, file_size) = deleted_short(&entries[2]);
+    assert_eq!(first_cluster, 4, "FRAG.BIN took the slot S1.BIN freed");
+    assert_eq!(file_size, FRAG_SIZE);
+
+    for (slot, cluster) in [(3usize, 5u32), (4, 6), (5, 7), (6, 8)] {
+        let (first, size) = deleted_short(&entries[slot]);
+        assert_eq!(first, cluster, "slot {slot}");
+        assert_eq!(size, CLUSTER_BYTES as u32, "slot {slot}");
+    }
+
+    // A block referenced by two deleted files is what NIST's forced-overwrite
+    // construction produces, and it is what makes this fixture worth having.
+    // Clusters 5 and 6 lie inside the fragmented entry's implied run and are
+    // also slots 3 and 4's own first clusters.
+    let clusters_needed = file_size.div_ceil(CLUSTER_BYTES as u32);
+    let last = first_cluster + clusters_needed - 1;
+    assert_eq!(last, 6);
+
+    for slot in [3usize, 4] {
+        let (first, _size) = deleted_short(&entries[slot]);
+        assert!(
+            (first_cluster..=last).contains(&first),
+            "slot {slot}'s cluster lies inside the fragmented entry's run"
+        );
+    }
+
+    assert!(
+        matches!(entries[1].kind, EntryKind::ShortName { .. }),
+        "slot 1 is S0.BIN and is live: {:?}",
+        entries[1]
+    );
+    assert!(
+        matches!(entries[7].kind, EntryKind::ShortName { .. }),
+        "slot 7 is S6.BIN and is live: {:?}",
+        entries[7]
+    );
+}
+
+/// `EXP-0004` commits to two digests. Both are reached here by two
+/// independent routes: parsed from the recorded text, and computed from
+/// content rebuilt in this file. A drift between the record and the
+/// generator fails here rather than inside a recovery assertion.
+#[test]
+fn the_recorded_digests_are_the_reconstructed_content() {
+    let truth = Sha256Digest::from_hex(FRAG_DIGEST_HEX).expect("the recorded digest parses");
+    assert_eq!(truth, digest_of(&frag_content()));
+    assert_eq!(truth.to_hex(), FRAG_DIGEST_HEX);
+
+    let commingled =
+        Sha256Digest::from_hex(COMMINGLED_DIGEST_HEX).expect("the recorded digest parses");
+    assert_eq!(commingled, digest_of(&commingled_content()));
+}
+
+/// FAT32 deletion zeroes the cluster chain, so the entry states a first
+/// cluster and a size and nothing about fragmentation. The run those imply
+/// reads as entirely free and the extraction is offered.
+#[test]
+fn a_fragmented_deleted_file_is_assessed_as_though_contiguous() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-fragmented-deleted.img");
+
+    let assessment = assess(&entries[2], &boot, extent, &mut evidence)
+        .expect("reading the FAT")
+        .expect("slot 2 is a deleted file");
+
+    let Assessment::Recoverable(found) = assessment else {
+        panic!("clusters 4 to 6 all read as free: {assessment:?}");
+    };
+
+    assert_eq!(found.run().first_cluster, 4);
+    assert_eq!(found.run().cluster_count, 3);
+    assert_eq!(found.run().last_cluster(), 6);
+    assert_eq!(found.run().file_size, FRAG_SIZE);
+    assert_eq!(
+        found.run().slack_bytes,
+        0,
+        "1536 bytes fill three 512-byte clusters exactly"
+    );
+}
+
+/// The measurement `CLAUDE.md` section 26 requires, and the case no fixture
+/// reached before `EXP-0004`.
+///
+/// Asserted by composition rather than against an opaque digest, so that a
+/// failure says which bytes were recovered. Cluster 5 belonged to `S2.BIN`
+/// and is recovered into this entry's object.
+#[test]
+fn the_recovery_contains_a_cluster_belonging_to_another_file() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-fragmented-deleted.img");
+
+    let Some(Assessment::Recoverable(found)) =
+        assess(&entries[2], &boot, extent, &mut evidence).expect("reading the FAT")
+    else {
+        panic!("slot 2 should be recoverable");
+    };
+
+    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+
+    assert_eq!(
+        extracted.digest,
+        digest_of(&commingled_content()),
+        "clusters 4, 5 and 6 hold FRAG.BIN, S2.BIN and FRAG.BIN in that order"
+    );
+    assert_ne!(
+        extracted.digest,
+        digest_of(&frag_content()),
+        "the recovered bytes are not the content of the file the entry names"
+    );
+    assert_eq!(extracted.bytes_hashed, u64::from(FRAG_SIZE));
+}
+
+/// The reference is the true content of a file that is present on this
+/// volume, in three pieces. The comparison still differs, and `ADR-0013`
+/// Decision E forbids the tool from saying which of the four causes applied.
+#[test]
+fn a_reference_to_the_fragmented_file_itself_differs() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-fragmented-deleted.img");
+
+    let Some(Assessment::Recoverable(found)) =
+        assess(&entries[2], &boot, extent, &mut evidence).expect("reading the FAT")
+    else {
+        panic!("slot 2 should be recoverable");
+    };
+
+    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let reference = Sha256Digest::from_hex(FRAG_DIGEST_HEX).expect("the recorded digest parses");
+
+    let validation = validate(extracted.digest, extracted.bytes_hashed, Some(reference));
+
+    assert_eq!(validation.outcome, Outcome::Differs);
+    assert_eq!(validation.covers, u64::from(FRAG_SIZE));
+    assert_eq!(validation.reference, Some(reference));
+}
+
+/// Nothing in the assessment separates a correct recovery from an incorrect
+/// one. All five deleted entries are offered, and the FAT has no evidence
+/// that would let any of them be refused.
+#[test]
+fn every_deleted_entry_on_the_volume_is_offered_for_recovery() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-fragmented-deleted.img");
+
+    for slot in [2usize, 3, 4, 5, 6] {
+        let assessment = assess(&entries[slot], &boot, extent, &mut evidence)
+            .expect("reading the FAT")
+            .expect("slots 2 to 6 are deleted files");
+
+        assert!(
+            matches!(assessment, Assessment::Recoverable(_)),
+            "slot {slot} is offered like every other: {assessment:?}"
+        );
+    }
+}
+
+/// The accuracy measurement. Each case pairs the content the entry's own
+/// file held with the content its implied run actually reads.
+///
+/// Slots 3 and 5 name clusters nothing reused and recover correctly. Slots
+/// 2, 4 and 6 name clusters `FRAG.BIN` was later written across. The tool
+/// reports all five identically.
+#[test]
+fn three_of_the_five_recoveries_are_not_the_entrys_own_content() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-fragmented-deleted.img");
+
+    let frag = frag_content();
+    let second = frag[CLUSTER_BYTES..2 * CLUSTER_BYTES].to_vec();
+    let third = frag[2 * CLUSTER_BYTES..].to_vec();
+
+    let cases: [(usize, Vec<u8>, Vec<u8>); 5] = [
+        (2, frag_content(), commingled_content()),
+        (3, spacer_content(2), spacer_content(2)),
+        (4, spacer_content(3), second),
+        (5, spacer_content(4), spacer_content(4)),
+        (6, spacer_content(5), third),
+    ];
+
+    let mut incorrect = 0;
+
+    for (slot, own, actual) in cases {
+        let Some(Assessment::Recoverable(found)) =
+            assess(&entries[slot], &boot, extent, &mut evidence).expect("reading the FAT")
+        else {
+            panic!("slot {slot} should be recoverable");
+        };
+
+        let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+
+        assert_eq!(
+            extracted.digest,
+            digest_of(&actual),
+            "slot {slot} recovers these bytes"
+        );
+
+        if extracted.digest != digest_of(&own) {
+            incorrect += 1;
+        }
+    }
+
+    assert_eq!(
+        incorrect, 3,
+        "three of five recoveries are not the content the entry's file held"
     );
 }
