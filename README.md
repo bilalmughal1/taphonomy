@@ -59,12 +59,14 @@ The initial development sequence is:
 6. Add regression, property, integration, and fuzz testing where appropriate.
 7. Expand recovery capabilities based on research and measured results.
 
-Item 5 is not complete. A recovery can now be validated against a reference
-the operator holds, and the differing case is tested, but the failure that
-matters most is unmeasured: a deleted file that was fragmented, whose
-clusters have since been freed, produces a run that passes the allocation
-check and a digest that is plausible and wrong. No fixture produces that
-case. `docs/development/KNOWN_ISSUES.md` records what building one requires.
+Item 5 is not complete, though the failure that matters most is now
+measured. A deleted file that was fragmented, whose clusters have since
+been freed, produces a run that passes the allocation check and a digest
+that is plausible and wrong. One fixture now produces that case, built from
+ordinary file operations rather than by editing an image, and on it three
+of five deleted entries recover content that is not their own file's while
+the tool reports all five identically. That is one arrangement of many.
+`docs/development/KNOWN_ISSUES.md` records which remain unmeasured.
 
 ## Initial Recovery Scope
 
