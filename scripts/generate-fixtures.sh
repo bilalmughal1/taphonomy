@@ -645,8 +645,8 @@ fixture_fat32_deleted_residue() {
 #
 # ADR-0010 Decision H. The deleted fixtures of M6 cannot exercise M7: every
 # deleted file in them occupies exactly one cluster, so there is no run to
-# walk, and mtools allocates forward, so no deleted file's clusters are ever
-# reused and the FAT check has nothing to refuse.
+# walk, and nothing in them reuses a deleted file's clusters, so the FAT
+# check has nothing to refuse.
 #
 # BIG.TXT is 1600 bytes, four clusters at this volume's 512-byte cluster
 # size, written before anything else so it takes the first four data
@@ -724,8 +724,14 @@ fixture_fat32_recover_collision() {
     # One field. BIG.TXT's DIR_FileSize goes from 1600 to 2560, so the run it
     # implies grows from four clusters to five and reaches cluster 7, which
     # LIVE1.TXT holds. That is the shape a volume takes when a deleted file's
-    # clusters have been reused, and mtools cannot produce it: it allocates
-    # forward and never reissues a freed cluster.
+    # clusters have been reused.
+    #
+    # mtools can produce that shape unaided, once the volume is full enough
+    # that its free-cluster search wraps: measured in EXP-0004. The poke is
+    # kept because it produces the shape while leaving every other byte
+    # identical to fat32-recover-run.img, which no unpoked route gives, and
+    # that control is what makes the refusal attributable to the declared
+    # size alone. ADR-0010 Appendix D.
     #
     # ADR-0006 section 5.1 permits deliberate corruption of one field in an
     # otherwise valid image. Every other byte here was written by mkfs.vfat,
