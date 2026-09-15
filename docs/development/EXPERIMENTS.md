@@ -1123,3 +1123,128 @@ the wrap is required.
    `fixture_fat32_recover_collision` comment, each in its own commit.
 6. Decide, in M9, how a confidence level is reported for an entry of this
    shape, given `DFR-RO-04`, `DFR-RO-05` and `DFR-RO-08`.
+
+### Appendix A: Limitations discharged, and three corrections (2026-09-15)
+
+This record was committed with two open limitations and one attribution it
+did not know it owed. All three are settled here. The findings above are
+not rewritten.
+
+#### A.1 Both limitations are discharged
+
+**Limitation 1, the predicted digest.** The tool was run against the
+fixture on the development machine. The entry at `c2 s2` reports
+`run 4-6, 1536 bytes, 0 slack, every cluster free` and
+`recovered sha256 7eef746a…`, which is the digest this record predicted
+from reading `src/fat_recovery.rs`. The four single-cluster entries report
+`43a3bb6a…`, `5f91be13…`, `7a37c8fd…` and `06e933a3…`, also as predicted.
+The record no longer predicts the tool's behaviour; it reports it.
+
+**Limitation 2, cross-machine determinism.** `scripts/generate-fixtures.sh`
+was run on the development machine and produced
+`52d92a825c375c2f296b6ee7ab5b6787ea801accfd3634f87d750139006dac20`, equal
+to the digest recorded above and measured elsewhere. The eighteen existing
+fixtures were unchanged, and `scripts/verify-fixtures.sh` reported
+`Deterministic: 19/19 fixtures byte-identical across runs`. The image
+digest is measured rather than provisional.
+
+#### A.2 The result this record did not anticipate
+
+The body predicted that the fragmented entry would recover incorrectly. It
+did not work out what happens to the other four deleted entries, and that
+is the measurement worth having.
+
+Slot order fixes which file each entry was. `FRAG.BIN` took the directory
+slot `S1.BIN` freed, so the five deleted entries are `FRAG.BIN`, `S2.BIN`,
+`S3.BIN`, `S4.BIN` and `S5.BIN` in slots 2 to 6.
+
+| Slot | Was | Implied run | Recovers | Correct |
+| --- | --- | --- | --- | --- |
+| 2 | `FRAG.BIN` | 4 to 6 | frag, `S2.BIN`, frag | no |
+| 3 | `S2.BIN` | 5 | its own cluster | yes |
+| 4 | `S3.BIN` | 6 | `FRAG.BIN`'s second third | no |
+| 5 | `S4.BIN` | 7 | its own cluster | yes |
+| 6 | `S5.BIN` | 8 | `FRAG.BIN`'s final third | no |
+
+Three of five recoveries are incorrect. Every one of the five reports
+identically — every cluster free, zero slack, a digest, no refusal — and
+nothing in the output separates the two that are right from the three that
+are wrong. This is the first time the tree has carried a measured
+incorrect-recovery rate, which `CLAUDE.md` §26 requires and no fixture
+before this one could produce.
+
+Two consequences follow that the body stated only as expectations.
+
+`DFR-RO-04` is breached visibly rather than by argument. Cluster 5 lies in
+slot 2's implied run and is the whole of slot 3's; cluster 6 lies in slot
+2's run and is the whole of slot 4's. Two clusters are each recovered into
+two different objects in one run of the tool.
+
+`ADR-0010` §10.2 is falsified by an artefact in the tree rather than in
+principle. It states that a fixture built with `mtools` alone cannot
+contain a deleted entry whose clusters have been reused. Slots 4 and 6 are
+exactly that. `ADR-0010` Appendix D records this.
+
+#### A.3 The method is NIST's, and this record should have said so
+
+The body presents the fill-and-wrap route as something this session
+worked out. It is a rediscovery. NIST's CFTT published the technique,
+under the name Forced Overwrite, as: create a desired block layout;
+allocate all remaining free blocks to one large file; delete one or more
+files; create one or more files, which must then overwrite the deleted
+ones because no other free blocks remain. CFTT ships a tool named
+`fill-fs` for the second step.
+
+The same source states the consequence this fixture depends on: some of
+the overwritten blocks end up referenced by the metadata of both a deleted
+and an active file, and deleting the active file leaves a block referenced
+by two deleted files. That is clusters 5 and 6 above. The property this
+fixture was built to exhibit is the property the published construction is
+designed to produce, which is a stronger footing than the body claims for
+it.
+
+Source: Jim Lyle, *Creating Deleted File Recovery Tool Testing Images*,
+NIST/CFTT, presented at AAFS, February 2012.
+
+#### A.4 A limitation the same source surfaces
+
+CFTT's first requirement for a recovery test image is that every sector be
+initialised uniquely, so that after formatting, anything not carrying the
+initialisation pattern is metadata, and any block appearing in a recovered
+object can be traced to its origin.
+
+This project's fixtures are built over zeroed images, and this fixture's
+filler is a single repeated byte. It does not weaken the measurements
+above: the cluster that matters, cluster 5, carries text naming the file it
+belonged to, which is why the composition assertions in
+`tests/fat32_recovery_fixtures.rs` can name it. But it is a standing
+limitation of the fixture laboratory rather than of this image, and a
+future fixture whose failure depends on distinguishing two filler clusters
+would not be diagnosable.
+
+#### A.5 The refusal case is also producible without a poke
+
+Measured 2026-09-15, in the same environment as the body. The construction
+above, stopped one step earlier — deleting only `FRAG.BIN` and leaving
+`S2.BIN` and `S4.BIN` live — produces a deleted entry whose implied run
+reaches a cluster allocated to a live file:
+
+```text
+slot 2  deleted  first=4  size=1536  implied=[4, 5, 6]  allocated=[5]
+```
+
+Two builds were byte-identical at
+`5f30fc3474f2ae0963ca2ad98c9791a687211997606b493c74ac21ef5078ddda`. This
+is the shape `fixtures/partition/fat32-recover-collision.img` uses a poke
+to create. It does not follow that the collision fixture should be rebuilt;
+`ADR-0010` Appendix D gives the reason it should not.
+
+The image was not added to the fixture set. It is NIST's Case 2, an active
+file between the fragments, and building it is a candidate for future work
+rather than part of this one.
+
+#### A.6 What this appendix does not change
+
+The construction, the digests, the FSINFO mechanism and the falsification
+of `KNOWN_ISSUES.md`'s claim all stand as written. Limitations 3, 4 and 5
+of the body remain open: this is one arrangement, not the class.
