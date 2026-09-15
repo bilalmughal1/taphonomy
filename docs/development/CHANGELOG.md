@@ -120,6 +120,12 @@ history.
 - Command-line argument handling covered by tests that run the binary,
   including that two of its checks precede opening the evidence
   (ADR-0013 §16)
+- A fixture holding a deleted file whose three clusters were not adjacent,
+  with the clusters between its fragments freed as well, built with
+  `mtools` alone and containing no poked field (EXP-0004)
+- Measurement of incorrect recovery on that fixture: three of its five
+  deleted entries recover content that is not their own file's, and the
+  tool reports all five identically (`CLAUDE.md` §26)
 
 ### Changed
 
