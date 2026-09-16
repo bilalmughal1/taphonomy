@@ -32,6 +32,7 @@
 //! Source evidence is immutable. This crate contains no code that opens a
 //! source path for writing. See `docs/SAFETY.md`.
 
+pub mod confidence;
 pub mod error;
 pub mod evidence;
 pub mod fat;
