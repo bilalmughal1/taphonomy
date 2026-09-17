@@ -606,3 +606,443 @@ Decisions A, B, D and E stand as written. Decision C's axis stands; its
 justification, its trigger set and its silence on anomalies are corrected
 above. §11's review triggers are unaffected. No decision here concerns
 what the tool recovers, refuses or validates.
+
+---
+
+## Appendix B: coverage re-measured, the status made three-valued, and exit status decided (2026-09-17)
+
+Designing step 3 required auditing Appendix A's trigger set and derivation
+against the tool at `51d4ae0` before building on them. The audit found a
+coverage gap that §A.7 does not name and that four fixtures carry, a
+derivation that cannot tell a rejected partition table from an empty one,
+and an inconsistency in Decision D. It also required deciding two things no
+document decides: where the aggregate lives and what the exit status
+reports.
+
+The body and Appendix A are not rewritten.
+
+---
+
+### B.1 Basis
+
+Read and quoted in preparing this appendix:
+
+* this record's §§5, 7, 8, 10, 11, 12, and Appendix A in full
+* `ADR-0003` §§4.5, 4.7, 5
+* `ADR-0011` §3
+* `ADR-0013` Appendix C.4 and C.6
+* `SAFETY.md` §§12, 13, 14
+* `CLAUDE.md` §§6, 9, 11, 14, 39
+* `ARCHITECTURE.md` §§20, 27
+* `RESEARCH_LOG.md` conclusion 6
+* `src/main.rs` in full; `src/partition.rs` `parse_mbr`;
+  `src/filesystem.rs` `identify`; `src/fat_recovery.rs` `Assessment` and
+  `Ineligible`; `src/validation.rs` `validate`
+* `scripts/generate-fixtures.sh`, the builders of every fixture named below
+* `tests/cli_arguments.rs`; `tests/fat32_directory_fixtures.rs`
+  `the_residue_fixture_ends_early_and_reports_what_follows`
+
+External sources consulted:
+
+* NIST CFTT, *Active File Identification & Deleted File Recovery Tool
+  Specification*, Draft 1 of Version 1.1, §§4, 5.1, 6.1
+* NIST CFTT, *Digital Data Acquisition Tool Specification*, Draft 1 for
+  Public Review of Version 4.0, §6.1
+* NIST CFTT, *Disk Imaging Tool Specification*, Version 3.1.6
+* CIPA DC-009, *Design rule for Camera File system*, DCF 2.0, 2010 edition
+* GNU diffutils manual, *Invoking diff* and *Invoking cmp*
+* rsync exit values, and the rsync mailing list and Back In Time issue
+  tracker on exit value 23
+* `fsck(8)`
+* Monitoring Plugins development guidelines and `Monitoring::Plugin::Functions`
+* *The Rust Programming Language*, §12.3, and `rust-lang/book` issues 2145
+  and 3606
+
+---
+
+### B.2 Subdirectories are a coverage gap, and four fixtures carry one
+
+`report_root_directory` lists a directory entry and does not read the
+directory it names. §A.6's rule is that a coverage statement reports what
+the run did not analyse. The contents of a listed directory were not
+analysed, so a listed directory is a gap, whether live or deleted, and
+whether or not it holds anything: from the evidence the tool cannot know.
+
+Measured over every fixture with the binary built at `51d4ae0`:
+
+```text
+for f in fixtures/partition/*.img; do o=$(./target/debug/taphonomy "$f" 2>&1); printf '%s dirs=%s unread=%s\n' "$(basename "$f")" "$(grep -cE 'directory( {2,}|, cluster)' <<<"$o")" "$(grep -ciE 'subdirector|not entered' <<<"$o")"; done
+```
+
+| Image | Directory listed and not read | Created by |
+| --- | --- | --- |
+| `fat32-root-entries` | live `/logs` | `mmd` in its fixture function |
+| `fat32-deleted-entries` | deleted `/gone` | `build_deleted_volume` |
+| `fat32-recover-run` | deleted `/gone` | `build_recovery_volume` |
+| `fat32-recover-collision` | deleted `/gone` | `build_recovery_volume` |
+
+Every other image returned `dirs=0`, and all nineteen returned `unread=0`:
+no output line anywhere states that a directory was not read.
+
+`fat32-deleted-residue` is built by `build_deleted_volume` and returned
+`dirs=0`. It was predicted to return 1, and the prediction was wrong. The
+fixture's one poked byte lands in slot 5, which held `/gone`, and makes it
+the terminator. The test that asserts that arrangement records that the
+terminator branch consumes the slot before the residue branch sees it. That
+image lists no directory, and nothing is uncovered by this kind.
+
+**§A.1's "ten are analysed end to end" is therefore six:** `mbr-empty` aside,
+they are `mbr-single-fat32`, `mbr-type-mismatch`, `fat32-hidden-mismatch`,
+`fat32-root-multicluster`, `fat32-deleted-residue` and
+`fat32-fragmented-deleted`. §A.1 measured whole-image and whole-volume gaps
+and did not test for this one. The claim went further than the measurement.
+
+**External requirement.** The CFTT deleted file recovery specification's
+first core requirement, DFR-CR-01, reads: "The tool shall identify all
+deleted File System-Object entries accessible in residual metadata." Its §4
+gives files and directories as the most common File System-Objects, and
+its definition of residual metadata records that a deleted directory's
+first data block usually remains accessible. Deleted entries inside `/logs`
+or `/gone` fall within the requirement, and this tool does not identify
+them. That is a non-conformance, recorded here beside those in `ADR-0013`
+Appendix A, and not resolved by this milestone.
+
+**Why it matters beyond the fixtures.** CIPA DC-009 defines the `DCIM`
+directory directly under the root as the DCF image root directory, and
+places the directories that hold image files directly under it. On a
+DCF-conformant camera card the root directory this tool reads holds no
+image file. Without this gap kind the run would report such a card as
+completely covered.
+
+`Assessment::Ineligible(Ineligible::Directory)` therefore stops being one
+of §A.7's refusals. A deleted directory is counted once, as this kind.
+
+---
+
+### B.3 Kind 1 includes an unreadable first sector, reachable without a fixture
+
+Where sector 0 cannot be read, `inspect` prints the error to `stderr` and
+never calls `parse_mbr`. §A.7's kind 1 says the table "could not be
+parsed"; here it was never read.
+Measured with an empty file outside the working tree:
+
+```text
+: > /tmp/taphonomy-empty.img && ./target/debug/taphonomy /tmp/taphonomy-empty.img 2>/tmp/taphonomy-empty.err; echo "exit=$?"; echo "--- stderr"; cat /tmp/taphonomy-empty.err
+path         /tmp/taphonomy-empty.img
+size         0 bytes
+read         0 bytes
+sha256       e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+exit=0
+--- stderr
+error: i/o failure reading /tmp/taphonomy-empty.img: failed to fill whole buffer
+```
+
+Nothing on `stdout` indicates that nothing past the hash was analysed, and
+the process exits zero. It is §A.4's measured harm on a second path. Kind 1
+covers both a table that could not be read and one that could not be
+parsed.
+
+---
+
+### B.4 Which kinds are reachable, and by what
+
+§A.7 records kinds 6 and 7 as unexercised and states that testing them
+requires fixtures that do not exist. At `51d4ae0` the position is:
+
+| Kind | Detected in | Reached by |
+| --- | --- | --- |
+| 1, table not parsed | `inspect` | `bad-signature`, `no-signature`, `partition-beyond-end` |
+| 1, sector 0 not read | `inspect` | no fixture; an empty file, §B.3 |
+| 2, GPT | `inspect` | `gpt-protective` |
+| 3, partition first sector not read | `report_partition` | nothing that is a static regular file |
+| 4, filesystem not identified | `report_partition` | `mbr-four-partitions` |
+| 4, identified, not analysed | `report_partition` | no fixture |
+| 5, boot sector rejected | `report_partition` | `fat32-bad-root-cluster`, `fat32-oversized-volume`, `fat32-undersized-fat` |
+| 6, root directory not enumerated | `report_root_directory` | no fixture |
+| 7, assessment or extraction failed | `report_recovery` | no fixture |
+| 8, directory listed and not read | `report_root_directory` | four fixtures, §B.2 |
+
+**Kind 3 is not unexercised but unreachable from any fixture.** `parse_mbr`
+rejects a partition of zero sectors and one that ends past the evidence,
+and `image_sectors` is computed from the bytes actually read. `VBR_SIZE` is
+one sector. Every accepted partition's first sector therefore lies inside
+what was read, and the read fails only on an I/O error or on evidence that
+changes during the run.
+
+**Kind 4's second half is unexercised.** `identify` recognises FAT12,
+FAT16, exFAT and NTFS, and every `mkfs.vfat` call in the generator is
+`-F 32`.
+
+**The first half of kind 1 needs no fixture**, as §B.3 measured.
+
+Kinds 6, 7 and the second half of 4 have no fixture, and kind 3 cannot
+have one, so their tests go on the derivation in §B.5.
+
+---
+
+### B.5 The status has three values, and §A.8's derivation is replaced
+
+§A.8 derives success where "the count of uncovered partitions and entries
+is zero". A rejected partition table and a GPT disk have no partitions
+parsed, so both counts are zero and the rule reports success, which is what
+`mbr-empty` reports. §A.6 names `mbr-empty` as the control that must keep
+those apart.
+
+It also cannot distinguish a run that analysed nothing from one that
+analysed four volumes of five. `SAFETY.md` §12, which is constraining,
+closes with: "A failure must never be silently converted into a partial
+success." A two-valued status reports both runs as the same gap.
+`CLAUDE.md` §14 separately requires that expected absence, malformed data,
+unsupported format and I/O failure be differentiated, which is what an
+enumeration by kind does and a single count does not.
+
+**The derivation.** A volume is analysed where its root directory was
+enumerated.
+
+| Status | Gaps of any kind | Volumes analysed |
+| --- | --- | --- |
+| complete | none | any, including none |
+| incomplete | at least one | at least one |
+| none | at least one | none |
+
+Applied to the measurements of §A.1, §B.2 and §B.3:
+
+| Status | Images |
+| --- | --- |
+| complete | `mbr-empty`, `mbr-single-fat32`, `mbr-type-mismatch`, `fat32-hidden-mismatch`, `fat32-root-multicluster`, `fat32-deleted-residue`, `fat32-fragmented-deleted` |
+| incomplete | `fat32-root-entries`, `fat32-deleted-entries`, `fat32-recover-run`, `fat32-recover-collision` |
+| none | `bad-signature`, `no-signature`, `partition-beyond-end`, `gpt-protective`, `fat32-bad-root-cluster`, `fat32-oversized-volume`, `fat32-undersized-fat`, `mbr-four-partitions`, and an empty file |
+
+Seven, four and eight, so every value varies on fixtures that exist. The
+three boot-sector-rejected images each declare exactly one partition in
+their generator functions, which is what places them under `none`.
+
+This table is derived from measurements and has not itself been measured,
+because no status is printed yet. Step 5's tests assert it.
+
+**One limit.** No fixture mixes an analysed volume with one that was not.
+`incomplete` is reached on fixtures only through kind 8. The mixed case is
+tested on the derivation.
+
+**External practice.** The Monitoring Plugins convention separates a check
+that found a problem from a check that could not run, and the Perl library
+that implements it records that "If no test were performed successfully
+the state will still be UNKNOWN." `fsck(8)` keeps errors left uncorrected
+and an operational error as separate conditions. Both correspond to the
+separation between `incomplete` and `none`.
+
+---
+
+### B.6 The word is `coverage`, not `SUCCESS`
+
+§A.8 has the run report success. On `fat32-fragmented-deleted`, whose
+status is `complete`, three of five recoveries are not their own file's.
+Beside those lines the word `SUCCESS` reads as a statement about recovery,
+and `CLAUDE.md` §6 lists a claim to have successfully recovered data among
+those that need evidence. The status therefore names
+what it measures: `coverage complete`, `coverage incomplete`,
+`coverage none`. The exact line format is step 3's.
+
+**§A.8's precedent, checked at source.** "Qualified" is from the 2001 Disk
+Imaging Tool Specification, Version 3.1.6, whose test cases give expected
+results such as "src compares qualified equal to dst". Version 4.0 of 2004,
+the Digital Data Acquisition Tool Specification, does not use the word: its
+DI-RM-07 requires that the tool "notify the user of the error type and the
+error location". §A.8's attribution is correct for the superseded
+specification. The current form is the enumeration without a summary word,
+and here the word stays because the operator needs a single line to find on
+`stdout`, as §A.4 measured.
+
+**Recorded as a departure, not a breach.** `SAFETY.md` §13 illustrates its
+requirement with `Status: SUCCESS` and `Status: PARTIAL`, and `ADR-0003` §5
+and `ADR-0013` §3 use `SUCCESS` as an example. §7 and §A.4 record that
+§13 defines no vocabulary. No code or test depends on either string.
+
+---
+
+### B.7 Decision D contradicts Decision A
+
+§8 states: "Under Decision E `STRUCTURALLY_VALID` is unreachable, so every
+artifact is below it and the distribution is always stated."
+
+§5 resolved the conflict between `ADR-0003` §4.2 and §4.5 in favour of
+§4.5, under which `RECONSTRUCTED` is not a position in the ordering. It
+cannot then be below `STRUCTURALLY_VALID`. The conclusion survives on a
+different premise: §4.7's first sentence requires counts per level
+unconditionally, so the distribution is stated because every session must
+state it, not because every artifact is below anything.
+
+---
+
+### B.8 What the aggregate contains
+
+**One line for artifacts.** The level is constant under Decision A, but the
+count of artifacts is not: it runs from zero to the number of extractions.
+§A.10 keeps the word off per-entry lines, and nothing retires the count.
+§4.7's first sentence is unconditional, and one line satisfies it.
+`Confidence` has one variant, so no structure keyed by level is built.
+
+**One line for comparison.** `validate` returns `NotAttempted` exactly when
+no reference is supplied, and Decision I compares one reference against
+every extraction. Within one run the outcome counts therefore have two
+shapes: every artifact not compared, or none. The line states whichever
+holds, and never repeats the artifact count as a third figure.
+
+**Deleted entries that produced no artifact, counted by `Assessment`
+variant.** `ADR-0013` Appendix C.4 asked for this so that an operator
+looking for a file knows the question went unanswered for part of the
+volume, and it measures the shortfall against DFR-CR-02, which requires a
+Recovered Object for each deleted entry. A split into refusals and errors
+misses two cases:
+
+* a free run not read because `--recover` was not passed, which is every
+  free run in a default invocation and is neither a refusal nor an error;
+* `Ineligible`, which is mostly not a refusal of a file: a long-name
+  component, a volume label and an invalid entry are not files, while an
+  entry with a size of zero, a reserved first cluster or a run out of range
+  is.
+
+The counts follow the variants: refused because a cluster is in use; free
+and not read; not assessed, and free with extraction failed, both of which
+are also kind 7; ineligible, by reason, with the non-file reasons not
+counted as files that went unrecovered. A deleted
+directory is counted under kind 8 only.
+
+**Coverage.** Volumes analysed, and gaps by kind, from which §B.5 derives
+the status.
+
+---
+
+### B.9 Where it lives: `src/main.rs`, beside `Caveats`
+
+Placement in the library was proposed and examined first, and rejected on
+the evidence.
+
+* `ARCHITECTURE.md` §20 lists status and confidence in an operation's
+  structured result, and §27 has future interfaces call the layer the CLI
+  calls. `ADR-0011` §3 classes `ARCHITECTURE.md` as intent: "It binds
+  nothing until corresponding code exists." It is the project's direction,
+  not a requirement.
+* `CLAUDE.md` §11, which is constraining, states: "The CLI must not contain
+  recovery algorithms." A count of what was covered and a status derived
+  from it are reporting, not recovery.
+* `CLAUDE.md` §9, which is also constraining, states: "Do not create
+  abstractions without a demonstrated requirement." No consumer other than
+  the CLI exists.
+* *The Rust Programming Language* §12.3 recommends moving a binary's logic
+  into `lib.rs`, partly because `main` cannot be tested directly. Issues
+  2145 and 3606 on its own tracker record that other functions in a binary
+  crate can be unit tested, and the workspace already runs the binary's
+  harness: `cargo test --workspace` prints a `running 0 tests` line for it.
+  The testing argument for the library therefore does not hold.
+
+The derivation is written as a function taking the counts and returning the
+status, so it is unit tested in `src/main.rs` without opening a fixture.
+
+**Review trigger.** A second consumer of the counts, such as a structured
+output mode or another interface, moves the counts and the derivation into
+the library.
+
+**`Caveats` is computed from the counts, not merged alongside them.** Each
+of its three booleans is a projection of a count: a free run, a match, a
+difference. Two values carried separately along the same path can disagree,
+which is §A.8's own reason for deriving the status rather than tracking it.
+`ADR-0013` Appendix C.6's distinction is not breached: it concerns what the
+paragraphs say, and none counts or aggregates findings.
+
+---
+
+### B.10 Exit status: `none` exits 3; everything else is unchanged
+
+No record decides the exit status of a run with a coverage gap. The only
+source for the current behaviour is the documentation comments on
+`report_partition` and `report_root_directory`, which state that a failure
+there does not change it.
+
+**Decision.** A run whose coverage is `none` exits 3. A run whose coverage
+is `complete` or `incomplete` exits 0, as now. Exit 1 for evidence that
+could not be opened or hashed, exit 2 for an argument error, and exit 0 for
+a differing digest under `ADR-0013` §3 are unchanged. 3 is used because 1
+and 2 already carry meanings in `main`.
+
+**Why `none`.** §A.4 and §B.3 measured runs that analysed nothing past the
+hash and exited zero, and `SAFETY.md` §12 forbids converting a failure
+silently. `CLAUDE.md` §39's preference for explicit failure over a best
+guess points the same way, though it is written about source and
+destination ambiguity and is not relied on here.
+
+**Why not `incomplete`.** Two considerations, one from the test suite and
+one external, decide it.
+
+* The primary recovery fixture is `incomplete`. `tests/cli_arguments.rs`'s
+  three tests that assert exit 0 all use `fat32-recover-run`, which carries
+  a deleted `/gone`.
+* Under §B.2's CIPA DC-009 finding, every DCF-conformant camera card is
+  `incomplete` while subdirectories are not read. A non-zero code on that
+  state would be the tool's ordinary result. rsync's exit value 23 shows
+  what follows: its users describe it on the rsync mailing list as meaning
+  anything without its own code, and report ignoring it, and Back In Time's
+  tracker proposes treating it as a warning. The gap is stated on `stdout`
+  instead, where §A.4 locates the harm.
+
+GNU diffutils likewise does not count a binary comparison as trouble even
+though its output does not capture every difference.
+
+**Considered and not acted on.** GNU `diff` and `cmp` exit 0 where inputs
+are the same, 1 where they differ, and 2 on trouble. That is the closest
+convention to a comparison, and it disagrees with `ADR-0013` §3's exit 0 on
+a differing digest. `ADR-0013` decided that on its own grounds and this
+milestone does not reopen it.
+
+This is a contract change and is its own commit, after the aggregate.
+
+---
+
+### B.11 Implementation order, replacing §A.9's merged step and those after it
+
+**Step 3.** Coverage counts including kind 8 and both halves of kind 1, the
+three-valued status derived from them, the aggregate block of §B.8 before
+the caveats, and `Caveats` computed from the counts. One commit, per §A.9.
+
+**Step 4.** Exit status 3 for `none`. One commit.
+
+**Step 5.** Tests. The derivation, unit tested for all three values, the
+mixed-volume case, and kinds 3, 6, 7 and the second half of 4. The binary:
+an empty file exits 3 and reports `coverage none`; `mbr-empty` reports
+`coverage complete`; `fat32-recover-run` reports `coverage incomplete` and
+exits 0; one fixture from §A.1's rejected tables exits 3. And Decision B: no
+entry without an artifact carries a level.
+
+**Step 6.** `ADR-0003` appendix recording which levels are unreachable;
+`README.md`, `docs/development/CHANGELOG.md`, `docs/PROJECT.md` §6.9 and
+`src/lib.rs`'s crate documentation; the documentation comments in
+`src/main.rs` that state a failure does not change the exit status.
+
+---
+
+### B.12 Parked, and not this milestone's
+
+* A terminator slot's surviving bytes. `fat32-deleted-residue`'s slot 5
+  still holds the remaining 31 bytes of the entry that was `/gone`, and
+  they are neither listed nor counted. Reporting them changes what an entry
+  reports, which §10 keeps out of M9.
+* A fixture holding two volumes of which one is analysed and one is not.
+* Reading subdirectories, which would close kind 8 and the DFR-CR-01
+  non-conformance of §B.2.
+
+---
+
+### B.13 What this appendix does not change
+
+Decisions A, B and E stand as written. Decision C's axis and §A.4's warrant
+for it stand. §A.5 and §A.6 stand, and §B.2 applies §A.6. §A.10 stands: the
+level appears in the aggregate only. §11's review triggers are unaffected.
+
+Replaced: §A.1's count of images analysed end to end; §A.7's list, extended
+by kind 8 and the first half of kind 1, and its statement of which kinds are
+unexercised; §A.7's classing of a deleted directory as a refusal; §A.8's
+two-valued derivation and its word; §8's premise that every artifact is
+below `STRUCTURALLY_VALID`; and §12's steps from 3 onward.
+
+No decision here concerns what the tool recovers, refuses or validates.
