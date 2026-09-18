@@ -41,6 +41,17 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A generated fixture by name, so a missing one fails as a missing fixture
+/// rather than as an evidence error deep in a later assertion.
+fn fixture(name: &str) -> String {
+    let path = format!("fixtures/partition/{name}");
+    assert!(
+        Path::new(&path).exists(),
+        "fixture missing: {path}\nrun ./scripts/generate-fixtures.sh first"
+    );
+    path
+}
+
 fn recovery_fixture() -> &'static str {
     let path = "fixtures/partition/fat32-recover-run.img";
     assert!(
@@ -179,4 +190,62 @@ fn a_differing_reference_is_a_finding_and_not_a_failure() {
         "recovered sha256 {BIG_DIGEST_HEX} over 1600 bytes"
     )));
     assert!(stdout.contains("A differing digest does not say which of these"));
+}
+
+/// `ADR-0014` Appendix B.10. A run that analysed nothing past the evidence
+/// digest exits non-zero. Appendix A.4 measured this image reporting its
+/// error on stderr, printing nothing on stdout that said so, and exiting
+/// zero, which `SAFETY.md` section 12 forbids: a failure must never be
+/// converted silently into a partial success.
+#[test]
+fn a_rejected_partition_table_analyses_nothing_and_exits_three() {
+    let output = run(&[&fixture("bad-signature.img")]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a run that analysed nothing must not exit zero"
+    );
+
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("coverage     none"),
+        "expected the coverage line on stdout, instead got: {stdout}"
+    );
+    assert!(stdout.contains("partition table not parsed"));
+}
+
+/// The control of `ADR-0014` Appendix A.6. An image whose table declares no
+/// partition analysed everything there was to analyse, so it is covered
+/// completely and exits zero. Under Appendix A.8's rule this image and the
+/// one above reported the same thing.
+#[test]
+fn an_image_declaring_no_partition_is_covered_completely_and_exits_zero() {
+    let output = run(&[&fixture("mbr-empty.img")]);
+
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("coverage     complete"),
+        "expected complete coverage, instead got: {stdout}"
+    );
+}
+
+/// `ADR-0014` Appendix B.10. Incomplete coverage exits zero. While
+/// subdirectories are not read this is the ordinary state of any volume
+/// holding one, so a non-zero code here would fire on almost every run and
+/// be learned as noise. The gap is reported on stdout instead.
+#[test]
+fn a_directory_that_was_not_read_leaves_coverage_incomplete_and_exits_zero() {
+    let output = run(&[recovery_fixture()]);
+
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("coverage     incomplete"),
+        "expected incomplete coverage, instead got: {stdout}"
+    );
+    assert!(stdout.contains("directories not read"));
 }

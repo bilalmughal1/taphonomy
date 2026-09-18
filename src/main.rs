@@ -109,8 +109,22 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    // `ADR-0014` Appendix B.10. A run that analysed nothing past the digest
+    // exits non-zero, because Appendix A.4 and B.3 measured such runs
+    // reporting their error on stderr, printing nothing on stdout that says
+    // so, and exiting zero: `SAFETY.md` section 12 forbids a failure being
+    // converted silently into a partial success.
+    //
+    // A run that covered part of the evidence exits zero. Reading no
+    // subdirectory makes that the ordinary state of any DCF camera card, and
+    // a code that fires on almost every run is one operators learn to
+    // ignore. The gap is stated on stdout, where the harm was measured.
+    //
+    // 1 stays an evidence that could not be opened or hashed, 2 an argument
+    // error, and a differing reference stays zero under `ADR-0013` section 3.
     match inspect(&path, options) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(Coverage::NothingAnalysed) => ExitCode::from(3),
+        Ok(Coverage::Complete | Coverage::Incomplete) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -118,7 +132,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Error> {
+fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<Coverage, taphonomy::Error> {
     let mut evidence = EvidenceFile::open(path)?;
     let reported = evidence.reported_size();
     let result = evidence.digest()?;
@@ -196,7 +210,7 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
     print_summary(&counts, options);
     print_caveats(&counts, options);
 
-    Ok(())
+    Ok(counts.coverage())
 }
 
 /// Reports the filesystem found in one partition.
