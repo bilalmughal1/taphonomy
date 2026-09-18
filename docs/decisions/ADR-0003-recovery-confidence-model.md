@@ -257,3 +257,124 @@ decision this appendix supports.
 No decision in this ADR is amended. The taxonomy, its rules, and the
 milestone at which it becomes binding are unchanged. §7's required
 amendments are unaffected.
+
+---
+
+## Appendix B: the model implemented, and the subset M9 leaves reachable (2026-09-19)
+
+`ADR-0014` Decision E names the writing of this appendix as one of its
+actions, so that this ADR's taxonomy and the subset of it this tool can
+produce are reconcilable by a reader holding only the ADR series.
+
+Recorded on completion of M9's implementation, at `4fb13eb`. Every state
+below was checked against the tree rather than against `ADR-0014`.
+
+### B.1 §8 is now spent
+
+Appendix A.1 corrected §8's first sentence. Its second and third are now
+discharged rather than corrected: `src/confidence.rs` assigns a level, so
+the taxonomy is binding from this milestone, exactly as §8 reserved it.
+
+| Section | Subject | State at M9 |
+| --- | --- | --- |
+| §3.1 | Two-stage pipeline | Implemented, unchanged from Appendix A.1. |
+| §3.2 | Six-level taxonomy | One variant implemented. The other five are recorded and not constructed: `ADR-0014` Decision E. |
+| §3.3 | Renaming of `HIGH_CONFIDENCE` | Not reached. Nothing is classified `STRUCTURALLY_VALID`. |
+| §4.1 | Single level | Satisfied. An artifact carries one level, and the run reports it once. |
+| §4.2 | No upgrade without evidence | Applied, and never exercised: a match does not promote. B.2 below. |
+| §4.3 | Downgrade always permitted | Not reached. One level exists, so there is nothing to lower to. |
+| §4.4 | Default on uncertainty | Applied. A missing reference yields `NotAttempted`, never read as a pass. |
+| §4.5 | `RECONSTRUCTED` is not an ordering | Governs. It decides B.2. |
+| §4.6 | Hash semantics | Applied. What a match establishes is bounded in the output itself. |
+| §4.7 | Aggregate reporting | Implemented. B.3 below. |
+| §5 | Relationship to operation status | Applied, with a third axis added. B.4 below. |
+
+### B.2 One level is reachable, and it is not `VERIFIED`
+
+Every artifact is `RECONSTRUCTED`. `ADR-0014` Decision A records the
+reasoning and is not restated here beyond what a reader of this ADR needs:
+
+§3.2 defines `VERIFIED` as byte-identity with a known-good reference, and M8
+implements exactly that comparison, so §4.2 would permit the promotion. §4.5
+forbids it, because `RECONSTRUCTED` names the method rather than a position
+in an ordering, and a level cannot be raised out of a category this ADR
+excludes from the ordering. §4.5 governs: every extraction this tool
+performs infers its extent, since deletion zeroes the cluster chain, so a
+match establishes that the inference was right for that entry and not that
+the method was different.
+
+EXP-0004 measured why that matters. On one volume, three of five deleted
+entries recover content that is not their own file's, and the tool reports
+all five identically. A level that varied would assert a discrimination the
+tool measurably does not have.
+
+§4.2 is not weakened by this. It remains binding as written for any level
+that becomes reachable later.
+
+What would make another level reachable: a format-aware validator reaches
+`STRUCTURALLY_VALID`, and a bounded extraction reaches `PARTIAL`. Either
+reopens `ADR-0014` Decision A, which records both as review triggers.
+
+### B.3 §4.7 as implemented
+
+The session statement is printed once per run, at indentation zero, after
+the per-volume output.
+
+* **Counts per level.** One line, `artifacts N RECONSTRUCTED`, printed where
+  `--recover` was passed. One level is reachable, so one line carries the
+  distribution; the count varies and the name does not.
+* **No combined success figure.** The status word names coverage rather than
+  success, so that a run which analysed everything it could reach does not
+  read as a claim that its recoveries are right: `ADR-0014` Appendix B.6.
+* **The distribution clause.** Under §4.5, `RECONSTRUCTED` is outside the
+  ordering, so no artifact this tool produces is *below*
+  `STRUCTURALLY_VALID` and that clause does not engage. The distribution is
+  stated anyway, because §4.7's first sentence requires it unconditionally.
+  `ADR-0014` Appendix B.7 corrects Decision D, which had reached the same
+  conclusion from the premise that every artifact is below it.
+* **What carries no level.** Entries that produced no artifact are counted
+  on their own line by what stopped them, never with a level attached:
+  `ADR-0014` Decision B.
+* **The outcome axis stays separate.** Comparison counts print on their own
+  line, as counts of what the reference established, not as a level.
+
+Measured on `fat32-recover-run.img` with `--recover` and `BIG.TXT`'s digest:
+
+```text
+coverage     incomplete
+  volumes analysed           1
+  directories not read       1
+artifacts    2 RECONSTRUCTED
+compared     1 matched, 1 differed
+```
+
+### B.4 §5's two axes, and the third M9 adds
+
+§5 keeps confidence, which classifies an artifact, apart from `SAFETY.md`
+§13's status, which classifies an operation. M9 adds coverage, which
+classifies neither: it states how much of the evidence the run analysed.
+
+The reading this project takes, recorded so that a later milestone does not
+merge them: coverage is §5's operation axis realised for this tool, named
+for what it measures. It is reported on its own line, never combined with a
+level or with a comparison, and `ADR-0014` Appendix B.5 derives it from what
+the run did not analyse rather than from what it recovered.
+
+The process exit status derives from coverage alone. A run that analysed
+nothing past the evidence digest exits 3. A differing digest still exits
+zero under `ADR-0013` §3, and cannot occur in a run whose coverage is
+`none`: a comparison requires an artifact, an artifact requires a volume
+analysed, and a volume analysed is what `none` excludes.
+
+### B.5 §7's required amendments are discharged
+
+Checked at `4fb13eb`: `SAFETY.md` §14 refers to this ADR as the single
+definition, `PROJECT.md` §6.9 refers to it in place of its six-term list,
+and `ARCHITECTURE.md` §36 carries the Candidate/Artifact note. None remains
+outstanding.
+
+### B.6 What this appendix does not change
+
+No decision in this ADR is amended. The six definitions in §3.2 stand as
+written, including the five no code path constructs. §§4.1 to 4.6 stand as
+rules. A level that is not implemented is not retired, and §7 is unaffected.
