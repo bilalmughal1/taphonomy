@@ -115,6 +115,11 @@ of the five deleted entries recover content that is not their own file's,
 and the tool reports all five identically: every cluster free, no refusal,
 a digest for each.
 
+The run reports that image's coverage as complete, which is correct and is
+a statement about reach alone: everything the tool could reach was
+analysed. Three of the five recoveries are still wrong. Coverage is not an
+accuracy claim and must not be read as one.
+
 What remains open is the rest of the space. NIST's CFTT deleted file
 recovery suite defines seventeen test cases, and this fixture is the
 equivalent of one of them. Unmeasured here: an active file lying between
@@ -129,24 +134,31 @@ not the case the requirement is about.
 
 ---
 
-## Two test suites are dominated by whole-image reads
+## Three test suites are dominated by whole-image reads
 
 `tests/cli_arguments.rs` runs the binary rather than calling into the
 crate, because argument handling and exit status are decisions `main`
-makes about `argv` and are not reachable from the library. Three of its
-eight tests open a fixture, and the binary hashes the whole 64 MB image
+makes about `argv` and are not reachable from the library. Six of its
+eleven tests open a fixture, and the binary hashes the whole 64 MB image
 before it reports anything.
 
-`tests/fat32_recovery_fixtures.rs` is now comparable, and for a different
+`tests/coverage_reporting.rs` runs the binary for the same reason: coverage
+and the exit status derived from it are decided once per run. Its eight
+tests spawn it eleven times, and every one of those hashes an image.
+
+`tests/fat32_recovery_fixtures.rs` is comparable, and for a different
 reason. It calls into the crate and spawns no process, so the cost is not
-the binary: it is opening 64 MB fixtures. Measured 2026-09-15:
+the binary: it is opening 64 MB fixtures. Measured 2026-09-19:
 
 ```text
-tests/cli_arguments.rs           8 tests   9.34s
-tests/fat32_recovery_fixtures.rs 22 tests  8.26s
+tests/coverage_reporting.rs       8 tests  24.11s
+tests/cli_arguments.rs           11 tests  15.90s
+tests/fat32_recovery_fixtures.rs 22 tests   8.37s
 ```
 
-Every other suite in the workspace finishes in under a tenth of a second.
+Every other suite in the workspace finishes in under a tenth of a second,
+and `cargo test --workspace` now takes about 48 seconds, of which those
+three are 48.
 
 A fixture small enough for tests that only need an argument decision would
 address the first and not the second. Reaching those decisions without a

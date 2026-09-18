@@ -11,9 +11,11 @@ directories, and recovers the data of an unfragmented deleted file.
 Recovered content is extracted to memory and reported as a SHA-256 digest.
 No file is written. Where the operator supplies a digest of the file they
 are looking for, the recovered digest is compared against it and the result
-reported as a match or a difference.
+reported as a match or a difference. Every run also states how much of the
+evidence it analysed and what it did not.
 
-Milestones M1 to M8 of ADR-0002 §8 are complete: evidence images are
+Milestones M1 to M9 of ADR-0002 §8 are complete, which is the whole of that
+sequence: evidence images are
 opened read-only and hashed, MBR partition tables are parsed with every
 declared extent validated against the true evidence size, GPT is detected
 and reported as unsupported, filesystems are identified from volume
@@ -21,7 +23,9 @@ structure, FAT32 boot sectors are parsed and validated against the
 partition extent they occupy, the root directory is enumerated by walking
 its cluster chain, the deleted entries within it are identified, the
 content of an eligible deleted file is read and hashed, and that digest is
-compared against a reference the operator supplies.
+compared against a reference the operator supplies, and the run reports
+what it recovered, what it could not, and how much of the evidence it
+reached.
 
 A deleted entry is reported with whatever fields deletion left intact.
 Where a long-name entry survives alongside it, the first character of its
@@ -49,6 +53,16 @@ compares against what it was given, and reports that nothing was validated
 when it was given nothing. See
 `docs/decisions/ADR-0013-m8-reference-validation-decisions.md`.
 
+A run states its own coverage. A directory that was listed and not read, a
+partition whose filesystem is not FAT32, a boot sector refused: each is
+counted, named, and reported, and the run is described as having covered
+the evidence completely, incompletely, or not at all. Coverage is about
+reach and not about correctness. A run can cover everything it could reach
+and still recover, for a fragmented deleted file, content that is not that
+file's. Every artifact carries one confidence level, `RECONSTRUCTED`, and a
+digest match is reported beside it rather than raising it. See
+`docs/decisions/ADR-0014-m9-classification-decisions.md`.
+
 The initial development sequence is:
 
 1. ~~Establish project, safety, security, and architecture contracts.~~ Done.
@@ -67,6 +81,22 @@ ordinary file operations rather than by editing an image, and on it three
 of five deleted entries recover content that is not their own file's while
 the tool reports all five identically. That is one arrangement of many.
 `docs/development/KNOWN_ISSUES.md` records which remain unmeasured.
+
+## Exit Status
+
+| Code | Meaning |
+| --- | --- |
+| 0 | The evidence was analysed, completely or in part |
+| 1 | The evidence could not be opened or hashed |
+| 2 | An argument error; no evidence was opened |
+| 3 | Nothing past the evidence digest was analysed |
+
+A gap in coverage does not by itself change the status. While subdirectories
+are not read, a volume holding one is analysed in part and exits 0, and the
+gap is reported on standard output. A digest that differs from the reference
+is a finding about the evidence and also exits 0.
+
+---
 
 ## Initial Recovery Scope
 
@@ -284,11 +314,14 @@ At this stage:
 * recovered content is reported as a digest and is not written to a file
 * only FAT32 is parsed beyond the partition table; exFAT and NTFS are
   identified and reported as unsupported
-* FAT32 support stops at the root directory; subdirectories are not read
+* FAT32 support stops at the root directory; subdirectories are not read,
+  and every directory listed is reported as a gap in the run's coverage
 * only an unfragmented deleted file is recovered; a run reaching an
   allocated cluster is refused rather than reconstructed
-* recovered content is not validated against a known-good reference and
-  carries no confidence level
+* recovered content is compared only against a reference the operator
+  supplies; the tool never discovers one
+* one confidence level is reachable, so every artifact carries the same one
+  and a reference match does not raise it
 * the long name of a deleted entry is not decoded; only its short name is
   recovered, and only where a long-name entry survives to determine it
 * only MBR partition tables are parsed; GPT is detected but not parsed

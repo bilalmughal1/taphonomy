@@ -126,6 +126,20 @@ history.
 - Measurement of incorrect recovery on that fixture: three of its five
   deleted entries recover content that is not their own file's, and the
   tool reports all five identically (`CLAUDE.md` §26)
+- A confidence level carried by a reconstructed artifact and reported once
+  per run, the only level `ADR-0003`'s model leaves reachable for this tool
+  (ADR-0002 M9, ADR-0014 Decision A)
+- A coverage statement reporting what a run did not analyse, as a count per
+  kind of gap and a status of complete, incomplete or none (ADR-0014
+  Appendix B.5)
+- A directory that was listed and not read counted as a gap, live or
+  deleted, which four fixtures hold and no run previously reported
+  (ADR-0014 Appendix B.2)
+- Counts of the deleted entries that produced no artifact, by what stopped
+  each one, so that an operator knows which questions went unanswered
+  (ADR-0013 Appendix C.4)
+- Artifact and comparison counts reported for the run rather than per
+  entry, which `ADR-0003` §4.7 requires of a session (ADR-0014 Appendix B.8)
 
 ### Changed
 
@@ -149,3 +163,9 @@ history.
   directory terminator they previously appeared twice in one run
 - The reporting functions take an options struct rather than a widening
   list of flags (ADR-0013 §13)
+- A run that analysed nothing past the evidence digest exits 3. It
+  previously exited 0 with nothing on standard output recording that
+  nothing had been analysed (ADR-0014 Appendix B.10)
+- Recovery caveats are computed from the run's counts rather than tracked
+  separately alongside them, so the two cannot disagree (ADR-0014
+  Appendix B.9)

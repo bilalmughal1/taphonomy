@@ -345,12 +345,15 @@ A Taphonomy feature is complete only when:
 Taphonomy has a validated read-only evidence layer, a FAT32 boot sector
 parser, a FAT32 root directory reader that identifies deleted entries,
 and recovery of the data of an unfragmented deleted file. Recovery
-extracts to memory and reports a digest; no file is written, and the
-result carries no confidence level.
+extracts to memory and reports a digest; no file is written. Where the
+operator supplies a reference digest, the recovered digest is compared
+against it, and the artifact carries the one confidence level ADR-0003's
+model leaves reachable.
 
-Milestones M1 to M7 of ADR-0002 section 8 are complete. The next
-engineering objective is M8, validating recovered data against a
-known-good reference.
+Milestones M1 to M9 of ADR-0002 section 8 are complete, which is the whole
+of that sequence. The next engineering objective is item 5 of the README's
+development sequence, validating recovery accuracy: the characteristic
+false positive is measured and the rest of the space is not.
 
 The technology stack is selected and recorded in ADR-0001. The safety
 and development contracts this section previously described as pending
