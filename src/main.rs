@@ -1,18 +1,24 @@
 //! Taphonomy command-line interface.
 //!
 //! The CLI is an interface to the library. It parses arguments, calls into
-//! the library, and formats output. It contains no analysis logic.
+//! the library, formats output, and counts what the run covered so that it
+//! can state a coverage status. It contains no recovery logic.
 //!
-//! See `docs/development/RESEARCH_LOG.md` conclusion 6.
+//! See `docs/development/RESEARCH_LOG.md` conclusion 6 and `CLAUDE.md`
+//! section 11. `ADR-0014` Appendix B.9 records why the counts live here
+//! rather than in the library: a count of what was covered is reporting
+//! rather than recovery, and no consumer other than this binary exists.
 
+use std::fmt;
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
 use taphonomy::Sha256Digest;
+use taphonomy::confidence::Confidence;
 use taphonomy::fat_directory::{
     DeletedKind, Entry, EntryKind, FirstByte, associate, enumerate_root, recovered_name,
 };
-use taphonomy::fat_recovery::{Assessment, assess, extract};
+use taphonomy::fat_recovery::{Assessment, Ineligible, assess, extract};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
@@ -129,7 +135,7 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
     }
 
     println!();
-    let mut caveats = Caveats::none();
+    let mut counts = RunCounts::default();
     let mut sector = [0u8; SECTOR_SIZE];
     match evidence.read_exact_at(0, &mut sector) {
         Ok(()) => {
@@ -155,12 +161,12 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
 
                             println!();
                             for p in &partitions {
-                                caveats =
-                                    caveats.merge(report_partition(&mut evidence, p, options));
+                                report_partition(&mut evidence, p, options, &mut counts);
                             }
                         }
                         PartitionTable::GptProtective => {
                             println!("GPT detected: not supported");
+                            counts.gpt += 1;
                         }
                     }
 
@@ -172,13 +178,23 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
                         }
                     }
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    counts.table_rejected += 1;
+                }
             }
         }
-        Err(e) => eprintln!("error: {e}"),
+        // The table was never read, so it was never parsed: `ADR-0014`
+        // Appendix B.3 measured this on an empty file, where nothing past
+        // the digest is analysed and nothing on stdout says so.
+        Err(e) => {
+            eprintln!("error: {e}");
+            counts.table_unread += 1;
+        }
     }
 
-    print_caveats(caveats, options);
+    print_summary(&counts, options);
+    print_caveats(&counts, options);
 
     Ok(())
 }
@@ -187,12 +203,19 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<(), taphonomy::Er
 ///
 /// A read or identification failure for one partition is reported and does
 /// not stop the others, nor change the process exit code: hashing already
-/// succeeded and that result stands on its own.
-fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, options: Options) -> Caveats {
+/// succeeded and that result stands on its own. Each such failure is
+/// counted, so that the coverage line states what the run did not analyse.
+fn report_partition(
+    evidence: &mut EvidenceFile,
+    p: &MbrPartition,
+    options: Options,
+    counts: &mut RunCounts,
+) {
     let mut vbr = [0u8; VBR_SIZE];
     if let Err(e) = evidence.read_exact_at(p.start_byte(), &mut vbr) {
         eprintln!("error: partition {}: {e}", p.index);
-        return Caveats::none();
+        counts.partition_unread += 1;
+        return;
     }
 
     let id = identify(&vbr);
@@ -234,8 +257,20 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, options: Opti
         }
     }
 
-    if id.filesystem() != Some(Filesystem::Fat32) {
-        return Caveats::none();
+    // Two different gaps, separated because `CLAUDE.md` section 14 requires
+    // an unsupported format and unreadable metadata to be told apart: a
+    // volume whose filesystem was identified and not analysed is not the
+    // same finding as one nothing could identify.
+    match id.filesystem() {
+        Some(Filesystem::Fat32) => {}
+        Some(_) => {
+            counts.unsupported += 1;
+            return;
+        }
+        None => {
+            counts.unidentified += 1;
+            return;
+        }
     }
 
     let extent = VolumeExtent {
@@ -268,11 +303,11 @@ fn report_partition(evidence: &mut EvidenceFile, p: &MbrPartition, options: Opti
                 }
             }
 
-            report_root_directory(evidence, &boot, extent, options)
+            report_root_directory(evidence, &boot, extent, options, counts);
         }
         Err(e) => {
             println!("    BOOT SECTOR REJECTED: {e}");
-            Caveats::none()
+            counts.boot_rejected += 1;
         }
     }
 }
@@ -296,14 +331,18 @@ fn report_root_directory(
     boot: &Fat32BootSector,
     extent: VolumeExtent,
     options: Options,
-) -> Caveats {
+    counts: &mut RunCounts,
+) {
     let root = match enumerate_root(evidence, boot, extent) {
         Ok(root) => root,
         Err(e) => {
             println!("    ROOT DIRECTORY NOT ENUMERATED: {e}");
-            return Caveats::none();
+            counts.root_unread += 1;
+            return;
         }
     };
+
+    counts.volumes_analysed += 1;
 
     let chain: Vec<String> = root.clusters.iter().map(|c| c.to_string()).collect();
 
@@ -332,48 +371,196 @@ fn report_root_directory(
         }
     }
 
-    let from_entries = report_recovery(evidence, boot, extent, &root.entries, options);
-    let from_residue = report_recovery(evidence, boot, extent, &root.residue, options);
+    // Every directory this run listed and did not read. `ADR-0014` Appendix
+    // B.2: what a listed directory holds was not analysed, and from the
+    // evidence the tool cannot know whether anything was there, so it is
+    // counted whether it is live or deleted and whatever it holds.
+    let listed = root.entries.iter().chain(root.residue.iter());
+    counts.directories_unread += listed.filter(|entry| is_directory(&entry.kind)).count();
 
-    from_entries.merge(from_residue)
+    report_recovery(evidence, boot, extent, &root.entries, options, counts);
+    report_recovery(evidence, boot, extent, &root.residue, options, counts);
 }
 
-/// Which statements a set of reported entries obliges the tool to make.
+/// Whether an entry describes a directory, live or deleted.
 ///
-/// `report_recovery` runs once for the directory's entries and once for its
-/// residue, so it returns what it owes rather than printing it. Printing
-/// from both calls said the same thing twice: on
-/// `fat32-deleted-residue.img`, which holds a recoverable deleted entry
-/// past the terminator, the caveat block appeared twice in one run.
-#[derive(Clone, Copy)]
-struct Caveats {
-    /// At least one entry's implied run was free in the FAT.
-    any_free: bool,
-
-    /// At least one extraction matched the operator's reference.
-    any_match: bool,
-
-    /// At least one extraction differed from it.
-    any_differs: bool,
+/// A deleted directory is counted here and not among the ineligible
+/// assessments, so that one entry is one gap rather than two findings.
+fn is_directory(kind: &EntryKind) -> bool {
+    match kind {
+        EntryKind::ShortName { directory, .. } => *directory,
+        EntryKind::Deleted {
+            was: DeletedKind::ShortName { directory, .. },
+        } => *directory,
+        _ => false,
+    }
 }
 
-impl Caveats {
-    /// Nothing owed. The value a path that reported no deleted content
-    /// returns, so that the early exits do not each repeat a literal.
-    const fn none() -> Self {
-        Self {
-            any_free: false,
-            any_match: false,
-            any_differs: false,
+/// What one run covered, produced, and left unanalysed.
+///
+/// One value accumulates for the whole run, because `ADR-0003` section 4.7
+/// requires a statement about a session rather than about a volume. It is
+/// passed down as `&mut` rather than returned and merged: a merge of these
+/// fields is a second place the arithmetic can fall out of step with the
+/// struct, which is the disagreement `ADR-0014` Appendix A.8 avoids by
+/// deriving a status rather than tracking one.
+///
+/// Only independently observed facts are stored. Everything that follows
+/// from them, including the caveats this file used to carry as three
+/// booleans, is derived below. `ADR-0014` Appendix B.8.
+#[derive(Default, Debug)]
+struct RunCounts {
+    /// Volumes whose root directory was enumerated.
+    volumes_analysed: usize,
+
+    /// Sector 0 could not be read, so no table was seen at all.
+    table_unread: usize,
+
+    /// The partition table was read and refused.
+    table_rejected: usize,
+
+    /// A GPT disk, which this tool does not analyse.
+    gpt: usize,
+
+    /// A partition whose first sector could not be read.
+    partition_unread: usize,
+
+    /// A partition holding no filesystem this tool could identify.
+    unidentified: usize,
+
+    /// A partition whose filesystem was identified and is not FAT32.
+    unsupported: usize,
+
+    /// A FAT32 volume whose boot sector was refused.
+    boot_rejected: usize,
+
+    /// A FAT32 volume whose root directory could not be enumerated.
+    root_unread: usize,
+
+    /// A directory that was listed and whose contents were not read.
+    directories_unread: usize,
+
+    /// A deleted entry whose assessment failed.
+    not_assessed: usize,
+
+    /// A deleted entry whose run was free and whose extraction failed.
+    not_extracted: usize,
+
+    /// A deleted entry whose implied run was free in the FAT.
+    free_runs: usize,
+
+    /// A deleted entry whose run holds a cluster still in use.
+    refused: usize,
+
+    /// An extraction whose digest equalled the operator's reference.
+    matched: usize,
+
+    /// A deleted entry stating a size of zero.
+    empty: usize,
+
+    /// A deleted entry naming cluster 0 or 1.
+    reserved_cluster: usize,
+
+    /// A deleted entry whose run would pass the last data cluster.
+    run_out_of_range: usize,
+}
+
+impl RunCounts {
+    /// Everything the run did not analyse, counted once per occurrence.
+    ///
+    /// The eleven kinds `ADR-0014` Appendix B.4 enumerates. Three of them
+    /// no fixture reaches and one no fixture can, which is why the
+    /// derivation below is unit tested rather than measured alone.
+    const fn gaps(&self) -> usize {
+        self.table_unread
+            + self.table_rejected
+            + self.gpt
+            + self.partition_unread
+            + self.unidentified
+            + self.unsupported
+            + self.boot_rejected
+            + self.root_unread
+            + self.not_assessed
+            + self.not_extracted
+            + self.directories_unread
+    }
+
+    /// How much of the evidence the run covered.
+    ///
+    /// `ADR-0014` Appendix B.5. A run that analysed nothing is kept apart
+    /// from one that analysed part of the evidence, because `SAFETY.md`
+    /// section 12 forbids a failure being converted silently into a partial
+    /// success. An image declaring no partition reaches `Complete` with no
+    /// volume analysed, which is the control Appendix A.6 names.
+    const fn coverage(&self) -> Coverage {
+        if self.gaps() == 0 {
+            Coverage::Complete
+        } else if self.volumes_analysed == 0 {
+            Coverage::NothingAnalysed
+        } else {
+            Coverage::Incomplete
         }
     }
 
-    /// What two sets of entries oblige between them.
-    fn merge(self, other: Self) -> Self {
-        Self {
-            any_free: self.any_free || other.any_free,
-            any_match: self.any_match || other.any_match,
-            any_differs: self.any_differs || other.any_differs,
+    /// Artifacts produced, which only `--recover` can produce.
+    ///
+    /// Every free run is either extracted or counted as not extracted, so
+    /// this follows from the two and is not tracked beside them. Saturating
+    /// because a count that disagrees with that invariant must not panic in
+    /// the middle of reporting evidence.
+    const fn artifacts(&self, options: Options) -> usize {
+        if options.recover {
+            self.free_runs.saturating_sub(self.not_extracted)
+        } else {
+            0
+        }
+    }
+
+    /// Free runs left unread because the operator did not ask to read them.
+    const fn not_read(&self, options: Options) -> usize {
+        if options.recover {
+            return 0;
+        }
+
+        self.free_runs
+    }
+
+    /// Extractions compared against a reference that did not equal it.
+    const fn differed(&self, options: Options) -> usize {
+        if options.reference.is_some() {
+            self.artifacts(options).saturating_sub(self.matched)
+        } else {
+            0
+        }
+    }
+}
+
+/// How much of the evidence a run analysed.
+///
+/// Three values rather than two: `ADR-0014` Appendix B.5 and B.6. The word
+/// names what it measures, because a run can cover everything and still
+/// recover content that is not the file's, which EXP-0004 measured.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Coverage {
+    /// Nothing went unanalysed.
+    Complete,
+
+    /// Part of the evidence was analysed and part was not.
+    Incomplete,
+
+    /// Nothing past the evidence digest was analysed.
+    ///
+    /// Named for what it says rather than `None`, which would shadow
+    /// `Option::None` wherever this is matched.
+    NothingAnalysed,
+}
+
+impl fmt::Display for Coverage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Complete => f.write_str("complete"),
+            Self::Incomplete => f.write_str("incomplete"),
+            Self::NothingAnalysed => f.write_str("none"),
         }
     }
 }
@@ -393,11 +580,9 @@ fn report_recovery(
     extent: VolumeExtent,
     entries: &[Entry],
     options: Options,
-) -> Caveats {
+    counts: &mut RunCounts,
+) {
     let mut heading = false;
-    let mut any_free = false;
-    let mut any_match = false;
-    let mut any_differs = false;
 
     let head = |heading: &mut bool| {
         if !*heading {
@@ -415,6 +600,7 @@ fn report_recovery(
             Err(e) => {
                 head(&mut heading);
                 println!("        {position:<9} NOT ASSESSED: {e}");
+                counts.not_assessed += 1;
                 continue;
             }
         };
@@ -424,6 +610,23 @@ fn report_recovery(
         match assessment {
             Assessment::Ineligible(reason) => {
                 println!("        {position:<9} no content: {reason}");
+
+                match reason {
+                    // Entries that describe a file which yielded nothing.
+                    Ineligible::EmptyFile => counts.empty += 1,
+                    Ineligible::ReservedFirstCluster { .. } => counts.reserved_cluster += 1,
+                    Ineligible::RunOutOfRange { .. } => counts.run_out_of_range += 1,
+                    // A deleted directory is a coverage gap, counted where
+                    // the directory was listed. The rest describe no file:
+                    // a long-name component, a volume label and an entry
+                    // with impossible attributes locate no content, so
+                    // counting them as files that went unrecovered would
+                    // answer `ADR-0013` Appendix C.4's question wrongly.
+                    Ineligible::Directory
+                    | Ineligible::VolumeLabel
+                    | Ineligible::LongNameComponent
+                    | Ineligible::InvalidEntry { .. } => {}
+                }
             }
             Assessment::RunBroken {
                 run,
@@ -436,9 +639,10 @@ fn report_recovery(
                     run.file_size
                 );
                 println!("        {position:<9} {detail}");
+                counts.refused += 1;
             }
             Assessment::Recoverable(found) => {
-                any_free = true;
+                counts.free_runs += 1;
                 let run = found.run();
                 let detail = format!(
                     "run {}-{}, {} bytes, {} slack, every cluster free",
@@ -468,14 +672,13 @@ fn report_recovery(
 
                             match (validation.outcome, validation.reference) {
                                 (Outcome::Match, Some(reference)) => {
-                                    any_match = true;
+                                    counts.matched += 1;
                                     println!(
                                         "        {:<9} reference sha256 {reference} MATCHES",
                                         ""
                                     );
                                 }
                                 (Outcome::Differs, Some(reference)) => {
-                                    any_differs = true;
                                     println!(
                                         "        {:<9} reference sha256 {reference} DIFFERS",
                                         ""
@@ -489,17 +692,115 @@ fn report_recovery(
                         }
                         Err(e) => {
                             println!("        {:<9} NOT EXTRACTED: {e}", "");
+                            counts.not_extracted += 1;
                         }
                     }
                 }
             }
         }
     }
+}
 
-    Caveats {
-        any_free,
-        any_match,
-        any_differs,
+/// Column the gap counts print in, set by the longest label below.
+const GAP_LABEL_WIDTH: usize = 26;
+
+/// Prints what the run covered and what it produced, once per run.
+///
+/// `ADR-0003` section 4.7 requires a session to report counts per level and
+/// forbids a single combined success figure. Under `ADR-0014` Decision A one
+/// level is reachable, so the level is one line here and the count on it is
+/// what varies: Appendix A.10 keeps the word off the per-entry lines, and
+/// Appendix B.8 keeps the count on this one.
+///
+/// The coverage line comes first because it scopes every count below it, and
+/// each line beneath states what was not analysed rather than what was
+/// there, which Appendix A.6 requires: the tool cannot know what a directory
+/// it did not read held, or what a partition it could not identify carried.
+///
+/// Printed for every run, including one whose partition table failed.
+/// Appendix A.4 measured that such a run reports its error on stderr and
+/// says nothing on stdout, so a reader capturing stdout alone sees a digest
+/// and no indication that nothing else was analysed.
+fn print_summary(counts: &RunCounts, options: Options) {
+    println!();
+    println!("coverage     {}", counts.coverage());
+
+    print_count("volumes analysed", counts.volumes_analysed);
+    print_gap("partition table not read", counts.table_unread);
+    print_gap("partition table not parsed", counts.table_rejected);
+    print_gap("GPT not analysed", counts.gpt);
+    print_gap("partitions not read", counts.partition_unread);
+    print_gap("filesystems not identified", counts.unidentified);
+    print_gap("filesystems not analysed", counts.unsupported);
+    print_gap("boot sectors rejected", counts.boot_rejected);
+    print_gap("root directories not read", counts.root_unread);
+    print_gap("entries not assessed", counts.not_assessed);
+    print_gap("entries not extracted", counts.not_extracted);
+    print_gap("directories not read", counts.directories_unread);
+
+    // Only `--recover` produces an artifact, so without it the line would
+    // report a zero that the invocation already determined.
+    if options.recover {
+        let artifacts = counts.artifacts(options);
+        if artifacts == 0 {
+            println!("artifacts    0");
+        } else {
+            println!("artifacts    {artifacts} {}", Confidence::of_inferred_run());
+        }
+    }
+
+    // Only where a reference was supplied. Where none was, the caveat block
+    // below already states that nothing was validated, and saying it twice
+    // would present one fact about the invocation as two findings.
+    if options.reference.is_some() {
+        let matched = counts.matched;
+        let differed = counts.differed(options);
+        println!("compared     {matched} matched, {differed} differed");
+    }
+
+    // Deleted entries that produced no artifact, by what stopped them.
+    // `ADR-0013` Appendix C.4: an operator asking whether a file is present
+    // needs to know the question went unanswered for part of the volume.
+    let mut unrecovered = Vec::new();
+    push_part(&mut unrecovered, counts.refused, "refused");
+    push_part(&mut unrecovered, counts.not_read(options), "not read");
+    push_part(&mut unrecovered, counts.not_assessed, "not assessed");
+    push_part(&mut unrecovered, counts.not_extracted, "not extracted");
+    push_part(&mut unrecovered, counts.empty, "size zero");
+    push_part(
+        &mut unrecovered,
+        counts.reserved_cluster,
+        "reserved first cluster",
+    );
+    push_part(
+        &mut unrecovered,
+        counts.run_out_of_range,
+        "run out of range",
+    );
+
+    if !unrecovered.is_empty() {
+        println!("unrecovered  {}", unrecovered.join(", "));
+    }
+}
+
+/// One line of the coverage block.
+fn print_count(label: &str, count: usize) {
+    println!("  {label:<width$} {count}", width = GAP_LABEL_WIDTH);
+}
+
+/// One line of the coverage block, printed only where there is something to
+/// report. A zero would state that a kind of gap did not occur, which reads
+/// as a finding about the evidence rather than about the run.
+fn print_gap(label: &str, count: usize) {
+    if count > 0 {
+        print_count(label, count);
+    }
+}
+
+/// One part of the unrecovered line, left out where its count is zero.
+fn push_part(parts: &mut Vec<String>, count: usize, label: &str) {
+    if count > 0 {
+        parts.push(format!("{count} {label}"));
     }
 }
 
@@ -518,8 +819,8 @@ fn report_recovery(
 /// Indented to zero for the same reason. At volume indentation it would
 /// read as a statement about the last volume printed rather than about the
 /// run it now covers.
-fn print_caveats(caveats: Caveats, options: Options) {
-    if !caveats.any_free {
+fn print_caveats(counts: &RunCounts, options: Options) {
+    if counts.free_runs == 0 {
         return;
     }
 
@@ -534,7 +835,7 @@ fn print_caveats(caveats: Caveats, options: Options) {
     // ADR-0013 section 8.2. A match is byte equality with what the operator
     // supplied, and where the content is not distinctive that is weaker
     // evidence than it reads as.
-    if caveats.any_match {
+    if counts.matched > 0 {
         println!();
         println!("A match establishes that these bytes are the");
         println!("reference's, byte for byte. Where content is not");
@@ -544,7 +845,7 @@ fn print_caveats(caveats: Caveats, options: Options) {
 
     // ADR-0013 Decision E. The causes are listed and none is chosen,
     // because the evidence does not distinguish between them.
-    if caveats.any_differs {
+    if counts.differed(options) > 0 {
         println!();
         println!("A differing digest does not say which of these");
         println!("happened: the file was fragmented, clusters of");
@@ -671,5 +972,169 @@ fn first_byte_detail(first: Option<FirstByte>, surviving: &[u8; 10]) -> String {
         // Unreachable: this arm is only reached for a deleted short entry,
         // which is exactly when `associate` answers.
         None => "first byte destroyed".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reference digest, for the invocations that supply one. Its value
+    /// never reaches a comparison here: these tests exercise the counts,
+    /// and `validation` owns what a comparison decides.
+    fn reference() -> Sha256Digest {
+        Sha256Digest::from_hex("0000000000000000000000000000000000000000000000000000000000000000")
+            .expect("64 hexadecimal characters")
+    }
+
+    fn recovering(reference: Option<Sha256Digest>) -> Options {
+        Options {
+            recover: true,
+            reference,
+        }
+    }
+
+    fn reporting() -> Options {
+        Options {
+            recover: false,
+            reference: None,
+        }
+    }
+
+    #[test]
+    fn an_image_declaring_no_partition_is_covered_completely() {
+        // `mbr-empty.img`: nothing was analysed because the table declares
+        // nothing to analyse, which `ADR-0014` Appendix A.6 names as the
+        // control a coverage statement must not report as a gap.
+        let counts = RunCounts::default();
+
+        assert_eq!(counts.coverage(), Coverage::Complete);
+    }
+
+    #[test]
+    fn a_volume_analysed_with_nothing_missed_is_covered_completely() {
+        let counts = RunCounts {
+            volumes_analysed: 1,
+            ..RunCounts::default()
+        };
+
+        assert_eq!(counts.coverage(), Coverage::Complete);
+    }
+
+    #[test]
+    fn a_rejected_partition_table_leaves_nothing_analysed() {
+        // `bad-signature.img`. Appendix A.8's rule reported this as a
+        // success, because it counted uncovered partitions and this run
+        // parsed none.
+        let counts = RunCounts {
+            table_rejected: 1,
+            ..RunCounts::default()
+        };
+
+        assert_eq!(counts.coverage(), Coverage::NothingAnalysed);
+    }
+
+    #[test]
+    fn a_listed_directory_leaves_a_volume_incompletely_covered() {
+        // `fat32-recover-run.img`, whose root holds a deleted `/gone`.
+        let counts = RunCounts {
+            volumes_analysed: 1,
+            directories_unread: 1,
+            ..RunCounts::default()
+        };
+
+        assert_eq!(counts.coverage(), Coverage::Incomplete);
+    }
+
+    #[test]
+    fn a_volume_lost_beside_one_analysed_is_incomplete() {
+        // No fixture holds two volumes of which one is analysed and one is
+        // not, which `ADR-0014` Appendix B.5 records. This is that case.
+        let counts = RunCounts {
+            volumes_analysed: 1,
+            boot_rejected: 1,
+            ..RunCounts::default()
+        };
+
+        assert_eq!(counts.coverage(), Coverage::Incomplete);
+    }
+
+    #[test]
+    fn every_kind_of_gap_is_counted_as_one() {
+        // The eleven kinds of Appendix B.4. Four are unreachable from any
+        // fixture, so this is the only place they are exercised.
+        let kinds: [fn(&mut RunCounts); 11] = [
+            |counts| counts.table_unread += 1,
+            |counts| counts.table_rejected += 1,
+            |counts| counts.gpt += 1,
+            |counts| counts.partition_unread += 1,
+            |counts| counts.unidentified += 1,
+            |counts| counts.unsupported += 1,
+            |counts| counts.boot_rejected += 1,
+            |counts| counts.root_unread += 1,
+            |counts| counts.not_assessed += 1,
+            |counts| counts.not_extracted += 1,
+            |counts| counts.directories_unread += 1,
+        ];
+
+        for set in kinds {
+            let mut counts = RunCounts::default();
+            set(&mut counts);
+
+            assert_eq!(counts.gaps(), 1);
+            assert_eq!(counts.coverage(), Coverage::NothingAnalysed);
+
+            counts.volumes_analysed = 1;
+
+            assert_eq!(counts.coverage(), Coverage::Incomplete);
+        }
+    }
+
+    #[test]
+    fn an_artifact_is_a_free_run_that_was_read() {
+        let counts = RunCounts {
+            free_runs: 3,
+            not_extracted: 1,
+            ..RunCounts::default()
+        };
+
+        assert_eq!(counts.artifacts(recovering(None)), 2);
+        assert_eq!(counts.not_read(recovering(None)), 0);
+    }
+
+    #[test]
+    fn without_recover_every_free_run_is_unread_and_no_artifact_exists() {
+        // The default invocation. `ADR-0010` Decision B: the run reports
+        // what the volume states and reads no content.
+        let counts = RunCounts {
+            free_runs: 3,
+            ..RunCounts::default()
+        };
+
+        assert_eq!(counts.artifacts(reporting()), 0);
+        assert_eq!(counts.not_read(reporting()), 3);
+    }
+
+    #[test]
+    fn a_difference_is_an_artifact_the_reference_did_not_equal() {
+        let counts = RunCounts {
+            free_runs: 3,
+            matched: 1,
+            ..RunCounts::default()
+        };
+
+        assert_eq!(counts.differed(recovering(Some(reference()))), 2);
+    }
+
+    #[test]
+    fn nothing_differs_where_no_reference_was_supplied() {
+        // `validate` returns `NotAttempted` for every extraction of such a
+        // run, so no artifact is a difference rather than every one.
+        let counts = RunCounts {
+            free_runs: 3,
+            ..RunCounts::default()
+        };
+
+        assert_eq!(counts.differed(recovering(None)), 0);
     }
 }
