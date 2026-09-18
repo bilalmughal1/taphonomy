@@ -2,7 +2,7 @@
 //!
 //! # Status
 //!
-//! Milestones M1 to M8 of ADR-0002 section 8. Taphonomy can open a RAW
+//! Milestones M1 to M9 of ADR-0002 section 8. Taphonomy can open a RAW
 //! evidence image read-only and hash it, parse an MBR partition table,
 //! identify the filesystem in a partition from its own structure, validate
 //! a FAT32 boot sector against the extent it occupies, enumerate the root
@@ -24,6 +24,21 @@
 //! reference is supplied by the operator and never discovered. Where none
 //! is supplied nothing is validated, which is reported rather than left as
 //! a silence.
+//!
+//! A reconstructed artifact carries the one confidence level ADR-0003's
+//! model leaves reachable, reported once for the run rather than against
+//! each entry: ADR-0014 Decision A and Appendix A.10.
+//!
+//! A run also reports what it did not analyse. A listed directory is not
+//! read, a partition whose filesystem is not FAT32 is not analysed, and
+//! each such gap is counted and stated: coverage is complete, incomplete,
+//! or none. A run that analysed nothing past the evidence digest exits 3,
+//! so a caller cannot take a digest and a silent stdout for a whole
+//! analysis: ADR-0014 Appendix B.
+//!
+//! Coverage is about reach and not about correctness. A run can cover
+//! everything it could reach and still recover, for a fragmented deleted
+//! file, content that is not that file's.
 //!
 //! A deleted entry's long name is not decoded.
 //!

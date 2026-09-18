@@ -216,9 +216,15 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<Coverage, taphono
 /// Reports the filesystem found in one partition.
 ///
 /// A read or identification failure for one partition is reported and does
-/// not stop the others, nor change the process exit code: hashing already
-/// succeeded and that result stands on its own. Each such failure is
-/// counted, so that the coverage line states what the run did not analyse.
+/// not stop the others: hashing already succeeded and that result stands on
+/// its own. Each is counted, so that the coverage line states what the run
+/// did not analyse.
+///
+/// It can decide the exit status, which before M9 it could not. Where such
+/// failures are all that happened and no volume was analysed, coverage is
+/// `none` and the run exits 3: `ADR-0014` Appendix B.10. Measured on
+/// `mbr-four-partitions.img`, whose four partitions hold nothing this tool
+/// identifies.
 fn report_partition(
     evidence: &mut EvidenceFile,
     p: &MbrPartition,
@@ -329,9 +335,10 @@ fn report_partition(
 /// Reports the root directory of a FAT32 volume.
 ///
 /// An enumeration failure is reported and does not stop the other
-/// partitions, nor change the process exit code, for the same reason a read
-/// failure does not: hashing already succeeded and that result stands on
-/// its own.
+/// partitions, for the same reason a read failure does not: hashing already
+/// succeeded and that result stands on its own. It is counted, and where no
+/// volume was analysed it leaves the run's coverage `none`, which exits 3:
+/// `ADR-0014` Appendix B.10.
 ///
 /// Every entry is listed. A directory may hold 65,536 of them, so this can
 /// be long, but truncating it would present a partial listing as a complete
