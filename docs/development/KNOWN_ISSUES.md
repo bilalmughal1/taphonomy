@@ -94,7 +94,7 @@ all. The trigger is a third caller, or any change that touches
 
 ---
 
-## Only one fragmentation arrangement is measured
+## Most fragmentation arrangements are unmeasured
 
 Deletion zeroes the cluster chain in every FAT, measured in EXP-0003, so
 nothing in the evidence says a deleted file occupied its clusters
@@ -107,26 +107,62 @@ deleted file that was fragmented, whose clusters have since been freed,
 produces a run that passes the allocation check and a digest that is
 plausible and wrong.
 
-That case is now measured. `fat32-fragmented-deleted.img` holds a deleted
-file whose three clusters were not adjacent, with the clusters between its
-fragments freed as well. It is built with `mkfs.vfat`, `mcopy` and `mdel`
-alone, with no poked field, by the technique EXP-0004 records. On it, three
-of the five deleted entries recover content that is not their own file's,
-and the tool reports all five identically: every cluster free, no refusal,
-a digest for each.
+Two arrangements are measured. Both are built with `mkfs.vfat`, `mcopy` and
+`mdel` alone, with no poked field, by the technique EXP-0004 records, and
+both share the generator's `build_fragmented_volume`.
 
-The run reports that image's coverage as complete, which is correct and is
+`fat32-fragmented-deleted.img` holds a deleted file whose three clusters
+were not adjacent, with the clusters between its fragments freed as well.
+On it, three of the five deleted entries recover content that is not their
+own file's, and the tool reports all five identically: every cluster free,
+no refusal, a digest for each.
+
+`fat32-fragmented-live-gap.img` is the same construction with the clusters
+between the fragments still allocated to live files. The run the fragmented
+entry implies reaches cluster 5, which the live `S2.BIN` holds, so the
+entry is refused before any content is read. This is the arrangement the
+tool handles correctly, and the refusal is reached with no byte written by
+this project, where `fat32-recover-collision.img` needs a poked size to
+produce one.
+
+The run reports both images as covered completely, which is correct and is
 a statement about reach alone: everything the tool could reach was
-analysed. Three of the five recoveries are still wrong. Coverage is not an
-accuracy claim and must not be read as one.
+analysed. Three of the first image's five recoveries are still wrong.
+Coverage is not an accuracy claim and must not be read as one.
 
-What remains open is the rest of the space. NIST's CFTT deleted file
-recovery suite defines seventeen test cases, and this fixture is the
-equivalent of one of them. Unmeasured here: an active file lying between
-the fragments rather than a deleted one, fragments in non-sequential
-order, files of more than two fragments, overwritten files, and large
-files. Until more of those are built, item 5 of the README's development
-sequence stays open.
+Three arrangements this document previously listed as unmeasured are in
+fact measured. The record is corrected here rather than carried forward:
+
+* **More than two fragments.** `FRAG.BIN` occupies clusters 4, 6 and 8 in
+  both images, which is three fragments and not two. EXP-0004 records the
+  `mshowfat` output, and the generator asserts that arrangement on every
+  run rather than assuming it.
+* **An active file lying between the fragments.** That is
+  `fat32-fragmented-live-gap.img`. EXP-0004 Appendix A.5 measured the
+  construction and its determinism before it became a fixture.
+* **Overwritten files.** `S3.BIN` and `S5.BIN` are deleted entries whose
+  single cluster was reallocated to `FRAG.BIN` and never freed again, so
+  both recover `FRAG.BIN`'s content rather than their own. EXP-0004
+  Appendix A.2 records the digests and notes that this falsifies ADR-0010
+  section 10.2.
+
+What remains unmeasured is large files, a file wrapping from the end of the
+volume to its beginning, and fragments in non-sequential order.
+
+The last of those is blocked rather than merely unbuilt. `mtools` starts
+each free-cluster search from the FAT32 FSINFO next-free hint and, once
+that search has wrapped, takes the free clusters it finds in ascending
+order, so a file whose logical fragment order runs backwards has no
+allocation path. Both routes to one are closed: ADR-0006 section 5.2
+rejects mounting, and a poked FAT chain or `mdoctorfat` falls under
+section 5.1's objection to hand-built structure and outside the CFTT
+specification's own testing scope, which excludes file system metadata that
+has been corrupted, modified or otherwise manipulated.
+
+NIST's CFTT deleted file recovery suite defines seventeen test cases, and
+the tree now holds the equivalent of two of them, so no score across the
+suite can be computed. Until more are built, item 5 of the README's
+development sequence stays open.
 
 Validation against a reference does not close the remainder. It detects a
 wrong digest only where the operator already holds the right one, which is
