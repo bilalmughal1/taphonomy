@@ -76,11 +76,15 @@ The initial development sequence is:
 Item 5 is not complete, though the failure that matters most is now
 measured. A deleted file that was fragmented, whose clusters have since
 been freed, produces a run that passes the allocation check and a digest
-that is plausible and wrong. One fixture now produces that case, built from
-ordinary file operations rather than by editing an image, and on it three
-of five deleted entries recover content that is not their own file's while
-the tool reports all five identically. That is one arrangement of many.
-`docs/development/KNOWN_ISSUES.md` records which remain unmeasured.
+that is plausible and wrong. Two fixtures now measure that space, both
+built from ordinary file operations rather than by editing an image. On
+the first, three of five deleted entries recover content that is not their
+own file's while the tool reports all five identically. On the second a
+live file still holds a cluster inside the implied run, so the entry is
+refused rather than recovered, which is the arrangement the tool handles
+correctly. That is two arrangements of many. Which of the rest remain
+unmeasured, and which cannot be built with the fixture laboratory as it
+stands, is recorded in `docs/development/KNOWN_ISSUES.md`.
 
 ## Exit Status
 

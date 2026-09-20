@@ -140,6 +140,11 @@ history.
   (ADR-0013 Appendix C.4)
 - Artifact and comparison counts reported for the run rather than per
   entry, which `ADR-0003` §4.7 requires of a session (ADR-0014 Appendix B.8)
+- A second fragmentation fixture, the same construction with the clusters
+  between the fragments still allocated, on which the run the deleted entry
+  implies reaches a live cluster and is refused rather than extracted. The
+  refusal is reached with no poked field, where the existing collision
+  fixture needs one (EXP-0004 Appendix A.5)
 
 ### Changed
 
