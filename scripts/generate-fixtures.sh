@@ -749,34 +749,37 @@ fixture_fat32_recover_collision() {
 }
 
 # ---------------------------------------------------------------------------
-# 19. FAT32 volume holding a deleted file whose clusters were not adjacent.
+# The volume both fragmentation fixtures share.
 #
-#     The tool's characteristic false positive. FAT32 deletion zeroes the
-#     cluster chain (EXP-0003), so a deleted entry states only a first
-#     cluster and a size, and the run it implies is a contiguous assumption.
-#     Where the file was fragmented and the clusters between its fragments
-#     have since been freed, that run reads as entirely free and extraction
-#     yields a plausible wrong digest. Nothing in the evidence records that
-#     the file was ever fragmented.
+#     FAT32 deletion zeroes the cluster chain (EXP-0003), so a deleted entry
+#     states only a first cluster and a size, and the run it implies is a
+#     contiguous assumption. Both fixtures below turn on that assumption
+#     being wrong; they differ only in what holds the clusters between the
+#     fragments when the volume is handed to the tool.
 #
-#     EXP-0004 measured how to produce this with mtools alone. mtools starts
-#     each free-cluster search from the FAT32 FSINFO next-free hint, so a
-#     cluster freed behind that hint is not reissued until the search wraps.
-#     Freeing a gap therefore achieves nothing; the volume must be filled so
-#     that scattered single clusters are the only space left, at which point
-#     a three-cluster file has no contiguous option.
+#     EXP-0004 measured how to produce the arrangement with mtools alone.
+#     mtools starts each free-cluster search from the FAT32 FSINFO next-free
+#     hint, so a cluster freed behind that hint is not reissued until the
+#     search wraps. Freeing a gap therefore achieves nothing; the volume must
+#     be filled so that scattered single clusters are the only space left, at
+#     which point a three-cluster file has no contiguous option. EXP-0004
+#     Appendix A.3 records that this is NIST CFTT's published Forced Overwrite
+#     technique rather than a local invention.
 #
-#     No byte of this image is written by this project. ADR-0006 section 5.1
+#     No byte of either image is written by this project. ADR-0006 section 5.1
 #     rejects hand-built structure, and no poke is needed here.
+#
+#     This builder stops with FRAG.BIN written and its fragmented chain
+#     asserted. Each fixture then performs its own deletions, which is where
+#     the two diverge and is the same division build_recovery_volume uses.
 # ---------------------------------------------------------------------------
-fixture_fat32_fragmented_deleted() {
-    local path="$OUT_DIR/fat32-fragmented-deleted.img"
-    printf 'fat32-fragmented-deleted.img\n'
+build_fragmented_volume() {
+    local path="$1" signature="$2"
     blank_image "$path"
 
     sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
 label: dos
-label-id: 0xfa73000b
+label-id: ${signature}
 unit: sectors
 ${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
 EOF
@@ -835,16 +838,77 @@ EOF
         exit 1
     fi
 
+    rm -rf "$work"
+}
+
+# ---------------------------------------------------------------------------
+# 19. FAT32 volume holding a deleted file whose clusters were not adjacent,
+#     with the clusters between its fragments freed as well.
+#
+#     The tool's characteristic false positive. The run FRAG.BIN's entry
+#     implies reads as entirely free and extraction yields a plausible wrong
+#     digest. Nothing in the evidence records that the file was ever
+#     fragmented. EXP-0004 Appendix A.2 measures the whole volume: three of
+#     its five deleted entries recover content that is not their own file's,
+#     and the tool reports all five identically.
+# ---------------------------------------------------------------------------
+fixture_fat32_fragmented_deleted() {
+    local path="$OUT_DIR/fat32-fragmented-deleted.img"
+    printf 'fat32-fragmented-deleted.img\n'
+
+    build_fragmented_volume "$path" 0xfa73000b
+
     # Free the clusters between the fragments, then the fragmented file. The
     # run its entry implies now reads as entirely free.
+    local img="${path}@@${VBR_OFFSET}"
     MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/S2.BIN
     MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/S4.BIN
     MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/FRAG.BIN
 
-    rm -rf "$work"
-
     note "a deleted file whose clusters were not adjacent, with the"
     note "clusters between its fragments freed as well"
+}
+
+# ---------------------------------------------------------------------------
+# 20. The same arrangement with the clusters between the fragments still
+#     allocated to live files.
+#
+#     The case above measures what the tool gets wrong. This one measures
+#     what it gets right. FRAG.BIN's implied run is 4 to 6 and cluster 5 is
+#     held by the live S2.BIN, so assess reaches an allocated cluster and
+#     ADR-0010 Decision C refuses the entry instead of extracting it.
+#
+#     This is Case 2 of the canonical list in Meyer and Roy, which EXP-0004's
+#     external practice section records: where an active file lies between the
+#     fragments, Recuva and Magnet AXIOM recover it anyway because they do not
+#     refuse on an allocated cluster. It is the one arrangement in that list
+#     where this tool's behaviour is correct, and until now nothing in the
+#     tree measured it.
+#
+#     The volume also carries two entries whose single cluster was reallocated
+#     to FRAG.BIN and never freed again: S3.BIN at cluster 6 and S5.BIN at
+#     cluster 8. Both runs read as free and both recover FRAG.BIN's content,
+#     which is the overwritten-deleted-file case. EXP-0004 Appendix A.2
+#     recorded the same two digests on the volume above.
+#
+#     Only the two mdel calls of fixture 19 are omitted, so the two images
+#     differ in twenty bytes: the disk signature, two directory entries' first
+#     byte, two cluster chains in each of the two FATs, and the FSINFO
+#     free-cluster count.
+# ---------------------------------------------------------------------------
+fixture_fat32_fragmented_live_gap() {
+    local path="$OUT_DIR/fat32-fragmented-live-gap.img"
+    printf 'fat32-fragmented-live-gap.img\n'
+
+    build_fragmented_volume "$path" 0xfa73000c
+
+    # Only the fragmented file. S2.BIN and S4.BIN stay live, so clusters 5
+    # and 7 stay allocated and the implied run 4 to 6 reaches one of them.
+    local img="${path}@@${VBR_OFFSET}"
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/FRAG.BIN
+
+    note "a deleted file whose clusters were not adjacent, with a live"
+    note "file still holding a cluster inside the run it implies"
 }
 
 # ---------------------------------------------------------------------------
@@ -870,6 +934,7 @@ fixture_fat32_deleted_residue
 fixture_fat32_recover_run
 fixture_fat32_recover_collision
 fixture_fat32_fragmented_deleted
+fixture_fat32_fragmented_live_gap
 
 # ---------------------------------------------------------------------------
 # Manifest
