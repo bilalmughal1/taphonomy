@@ -1248,3 +1248,147 @@ rather than part of this one.
 The construction, the digests, the FSINFO mechanism and the falsification
 of `KNOWN_ISSUES.md`'s claim all stand as written. Limitations 3, 4 and 5
 of the body remain open: this is one arrangement, not the class.
+
+### Appendix B: the refusal case becomes a fixture (2026-09-20)
+
+Appendix A.5 measured a construction and did not add it to the fixture set.
+It is now `fixtures/partition/fat32-fragmented-live-gap.img`. This appendix
+records what that took, what the tool reports on it, and which of the
+body's limitations it discharges. The body and Appendix A are not
+rewritten.
+
+#### B.1 The construction is a fixture, and its digest reproduced
+
+`scripts/generate-fixtures.sh` gained the fixture at `3f6e7ef`, with disk
+signature `0xfa73000c`, and `fixtures/partition/MANIFEST.sha256` recorded
+it at `0b998f7`.
+
+The two fragmentation fixtures now share `build_fragmented_volume`, which
+ends with `FRAG.BIN` written and its chain asserted. Each fixture then
+performs its own deletions, which is the division `build_recovery_volume`
+already uses and is where the two volumes diverge. The refactor is
+behaviour-preserving: all nineteen existing fixtures reproduce the digests
+`MANIFEST.sha256` already recorded, which covers the output of `sfdisk`,
+`sgdisk`, `mkfs.vfat` and `mtools` at once.
+
+The fixture's digest is
+`5f30fc3474f2ae0963ca2ad98c9791a687211997606b493c74ac21ef5078ddda`, equal
+to the digest Appendix A.5 recorded. It was measured on the development
+machine and, before delivery, in a second Ubuntu 24.04 environment running
+`mtools` 4.0.43-1build1, `dosfstools` 4.2-1.1build1, `sfdisk` from
+util-linux 2.39.3 and `sgdisk` 1.0.10. `scripts/verify-fixtures.sh` reports
+`Deterministic: 20/20 fixtures byte-identical across runs`.
+
+**Limitation 2 is therefore discharged for this construction as well.** A.1
+discharged it for `fat32-fragmented-deleted.img` only. The digest recorded
+in A.5, taken off the development machine, has now been reproduced on the
+development machine and in a third environment.
+
+#### B.2 What the tool reports on it
+
+Measured at `421272d`, with no arguments:
+
+```text
+coverage     complete
+  volumes analysed           1
+unrecovered  1 refused, 2 not read
+```
+
+The volume carries three deleted entries rather than the five of
+`fat32-fragmented-deleted.img`, because `S2.BIN` and `S4.BIN` are never
+deleted:
+
+| Slot | Was | Implied run | Cluster state | Reported |
+| --- | --- | --- | --- | --- |
+| 2 | `FRAG.BIN` | 4 to 6, 1536 bytes | 5 held by live `S2.BIN` | refused |
+| 4 | `S3.BIN` | 6, 512 bytes | free | recovers `5f91be13…` |
+| 6 | `S5.BIN` | 8, 512 bytes | free | recovers `06e933a3…` |
+
+Those two digests are two of the four A.1 recorded on the volume above, and
+both clusters hold `FRAG.BIN`'s content rather than the entry's own: cluster
+6 is its second third and cluster 8 its last. So this volume measures the
+refusal and the overwritten-entry case together.
+
+Its root holds no directory, so it carries no gap of `ADR-0014` Appendix
+B.2's kind and its coverage is `complete`. That is a statement about reach
+alone. Two of its three deleted entries would still recover another file's
+bytes, which is the separation `ADR-0014` Appendix B.6 named the status for.
+
+`tests/fat32_recovery_fixtures.rs` asserts the layout and the refusal at
+`421272d`. It does not assert slots 4 and 6, because
+`three_of_the_five_recoveries_are_not_the_entrys_own_content` already
+asserts that behaviour on the sibling volume, and a second assertion of the
+same fact against a different image illustrates rather than proves.
+
+#### B.3 Limitation 3, and what remains of it
+
+The body's Limitation 3 named three arrangements it did not build. One is
+now built:
+
+* **An active file between the fragments.** Built. It is this fixture.
+* **A file wrapping from the end of the volume to the beginning.** Not
+  built, and nothing here establishes whether it can be.
+* **Fragments out of logical order.** Blocked rather than unbuilt. B.4.
+
+Two further arrangements were listed as unmeasured in
+`docs/development/KNOWN_ISSUES.md` and were already measured by this
+record. Both entries were corrected at `b4a53bc`:
+
+* **More than two fragments.** `FRAG.BIN` occupies clusters 4, 6 and 8,
+  which the body records as `::/FRAG.BIN <4> <6> <8>` and which the
+  generator asserts on every run. That is three fragments.
+* **Overwritten files.** Appendix A.2's slots 4 and 6 are deleted entries
+  whose cluster was reallocated to `FRAG.BIN` and never freed again.
+
+Limitations 4 and 5 of the body remain open, unchanged.
+
+#### B.4 Fragments out of logical order have no route here
+
+The body measured that `mtools` starts each free-cluster search from the
+FAT32 FSINFO next-free hint, and that `FRAG.BIN` took clusters 4, 6 and 8
+in ascending order once the search had wrapped. A forward search that does
+not go backwards cannot issue a later cluster before an earlier one, so a
+file whose logical fragment order runs backwards has no allocation path
+under this method. That is one measurement and a mechanism consistent with
+it; no route to a descending order has been identified.
+
+Both alternatives are closed by existing decisions rather than by
+difficulty. `ADR-0006` §5.2 rejects mounting, which is how Meyer and Roy
+built their images and why the simple gap method works for them. A poked
+FAT chain, or `mdoctorfat`, falls under `ADR-0006` §5.1's objection to
+hand-built structure, and the body's external practice section records that
+the CFTT specification's own scope excludes file system metadata that has
+been corrupted, modified or otherwise manipulated — so an image built that
+way would not measure the test case it was built for.
+
+This is recorded as a limit of the fixture laboratory, not as pending work.
+
+#### B.5 What the two images differ in, measured
+
+The images differ in twenty bytes: the MBR disk signature, the first byte
+of two directory entries, two cluster chains in each of the two FATs, and
+the FSINFO free-cluster count. Semantically the only difference is whether
+two `mdel` calls ran.
+
+That does not give the single-field control `ADR-0010` Appendix D.3
+requires of `fat32-recover-collision.img`, and D.3's conclusion stands
+unchanged. What it does give is a controlled pair for the allocation state
+of the clusters between the fragments: the same volume, the same file in
+the same three clusters, refused in one image and extracted in the other.
+
+#### B.6 An attribution in Appendix A.5
+
+A.5 describes the arrangement as "NIST's Case 2". The numbering is Meyer
+and Roy's, from the canonical list the body's external practice section
+cites: their Case 2 is an active file between the fragments and their
+Case 3 is the unallocated-gap case the body built. Nothing read for this
+record numbers CFTT's own test cases that way. The fixture's tests and
+`KNOWN_ISSUES.md` attribute the numbering to Meyer and Roy.
+
+#### B.7 What this appendix does not change
+
+The construction, the digests, the FSINFO mechanism, Appendix A.2's table
+and Appendix A.3's attribution of the method to NIST's Forced Overwrite all
+stand as written. `ADR-0010` Appendix D stands in full. No finding here
+concerns what the tool recovers, refuses or validates, and none of it
+changes a decision.
