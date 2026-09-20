@@ -107,6 +107,15 @@ deleted file that was fragmented, whose clusters have since been freed,
 produces a run that passes the allocation check and a digest that is
 plausible and wrong.
 
+Since M10 it also produces a **file**. With `--output` the artifact is
+written whole, at the size the entry declared, and the run reports that
+what landed matches what was read — which it does. Nothing about the file
+on disk distinguishes it from a correct recovery: not its size, not its
+name, not the verification line beside it. The operator is handed a
+plausible wrong file rather than a plausible wrong digest, which is the
+worse of the two, and only a reference digest they already hold can tell
+them which they have.
+
 Two arrangements are measured. Both are built with `mkfs.vfat`, `mcopy` and
 `mdel` alone, with no poked field, by the technique EXP-0004 records, and
 both share the generator's `build_fragmented_volume`.

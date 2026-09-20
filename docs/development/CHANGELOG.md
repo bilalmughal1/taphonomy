@@ -140,6 +140,16 @@ history.
   (ADR-0013 Appendix C.4)
 - Artifact and comparison counts reported for the run rather than per
   entry, which `ADR-0003` §4.7 requires of a session (ADR-0014 Appendix B.8)
+- `--output <directory>`, writing each recovered artifact to a file named
+  from the entry's slot and first cluster, so no byte of evidence reaches
+  the path (ADR-0015 Decisions A and D)
+- Read-back verification of every written artifact: the file is re-opened,
+  hashed, and reported as matching or differing from what was read, which
+  states what landed rather than what was sent (ADR-0015 Decision H)
+- Refusal of a destination holding the evidence, before the evidence is
+  opened (ADR-0015 Decision B, corrected by its Appendix A)
+- A twelfth coverage gap, for an artifact that was read and could not be
+  handed to the operator (ADR-0015 section 9)
 - A second fragmentation fixture, the same construction with the clusters
   between the fragments still allocated, on which the run the deleted entry
   implies reaches a live cluster and is refused rather than extracted. The

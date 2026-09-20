@@ -9,13 +9,15 @@ The project is designed around evidence preservation, correctness, security, rep
 Taphonomy has a validated read-only evidence layer, reads FAT32 root
 directories, and recovers the data of an unfragmented deleted file.
 Recovered content is extracted to memory and reported as a SHA-256 digest.
-No file is written. Where the operator supplies a digest of the file they
-are looking for, the recovered digest is compared against it and the result
-reported as a match or a difference. Every run also states how much of the
-evidence it analysed and what it did not.
+Where `--output` names a destination, each artifact is also written to a
+file, read back from disk, and reported as matching or differing from what
+was read. Where the operator supplies a digest of the file they are looking
+for, the recovered digest is compared against it and the result reported as
+a match or a difference. Every run also states how much of the evidence it
+analysed and what it did not.
 
 Milestones M1 to M9 of ADR-0002 §8 are complete, which is the whole of that
-sequence: evidence images are
+sequence, and M10 has since added the output path. Evidence images are
 opened read-only and hashed, MBR partition tables are parsed with every
 declared extent validated against the true evidence size, GPT is detected
 and reported as unsupported, filesystems are identified from volume
@@ -315,7 +317,9 @@ docs/decisions/
 
 At this stage:
 
-* recovered content is reported as a digest and is not written to a file
+* a recovered artifact is written whole at the size its entry declared, so
+  nothing about the file tells an operator whether the content is the
+  file's; only a reference digest can establish that
 * only FAT32 is parsed beyond the partition table; exFAT and NTFS are
   identified and reported as unsupported
 * FAT32 support stops at the root directory; subdirectories are not read,
