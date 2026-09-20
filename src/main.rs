@@ -10,6 +10,8 @@
 //! rather than recovery, and no consumer other than this binary exists.
 
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use taphonomy::EvidenceFile;
@@ -18,7 +20,7 @@ use taphonomy::confidence::Confidence;
 use taphonomy::fat_directory::{
     DeletedKind, Entry, EntryKind, FirstByte, associate, enumerate_root, recovered_name,
 };
-use taphonomy::fat_recovery::{Assessment, Ineligible, assess, extract};
+use taphonomy::fat_recovery::{Assessment, Destination, Ineligible, Output, assess, extract};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
@@ -27,14 +29,15 @@ use taphonomy::partition::{MbrPartition, PartitionTable, SECTOR_SIZE, parse_mbr}
 use taphonomy::validation::{Outcome, validate};
 
 /// One line of usage, printed on any argument error.
-const USAGE: &str = "usage: taphonomy <evidence-image> [--recover] [--reference-digest <hex>]";
+const USAGE: &str = "usage: taphonomy <evidence-image> [--recover] \
+                     [--output <directory>] [--reference-digest <hex>]";
 
 /// What the operator asked for.
 ///
 /// The reporting functions take this rather than a widening list of flags.
 /// `ADR-0013` section 13.
 #[derive(Clone, Copy)]
-struct Options {
+struct Options<'a> {
     /// Read and hash the content of a deleted file whose run is free.
     ///
     /// `ADR-0010` Decision B: opt-in, because the default invocation
@@ -47,6 +50,15 @@ struct Options {
     /// this is the only way one enters. Decision H: it is an argument
     /// error without `recover`, because comparing needs content read.
     reference: Option<Sha256Digest>,
+
+    /// Directory each recovered artifact is written to.
+    ///
+    /// `ADR-0015` Decision A: opt-in, and an argument error without
+    /// `recover`, on the same grounds as `reference`. Decision B, as
+    /// Appendix A.3 corrects it: checked against the evidence before the
+    /// evidence is opened, so a destination that is the evidence never
+    /// reaches a write.
+    output: Option<&'a Path>,
 }
 
 fn main() -> ExitCode {
@@ -64,10 +76,26 @@ fn main() -> ExitCode {
     let mut options = Options {
         recover: false,
         reference: None,
+        output: None,
     };
+
+    // Owned here so that `options` can borrow it for the rest of the run,
+    // which keeps `Options` `Copy` and the reporting functions taking it by
+    // value.
+    let mut output = None;
+
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--recover") => options.recover = true,
+            Some("--output") => {
+                let Some(value) = args.next() else {
+                    eprintln!("error: --output requires a directory");
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                };
+
+                output = Some(PathBuf::from(value));
+            }
             Some("--reference-digest") => {
                 let Some(value) = args.next() else {
                     eprintln!("error: --reference-digest requires a digest");
@@ -100,7 +128,9 @@ fn main() -> ExitCode {
         }
     }
 
-    // ADR-0013 Decision H. A reference is useless without content to
+    options.output = output.as_deref();
+
+    // `ADR-0013` Decision H. A reference is useless without content to
     // compare, and implying --recover would enable reading a deleted file's
     // content without the operator asking for it.
     if options.reference.is_some() && !options.recover {
@@ -122,6 +152,26 @@ fn main() -> ExitCode {
     //
     // 1 stays an evidence that could not be opened or hashed, 2 an argument
     // error, and a differing reference stays zero under `ADR-0013` section 3.
+    // `ADR-0015` Decision A. Writing is more than reading, so it inherits
+    // `ADR-0010` Decision B's requirement that the operator ask.
+    if options.output.is_some() && !options.recover {
+        eprintln!("error: --output needs --recover, which reads content");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+
+    // `ADR-0015` Decision B as Appendix A.3 corrects it. Before the
+    // evidence is opened, because `SAFETY.md` section 12 lists a
+    // source/destination collision among the conditions the tool fails
+    // closed on.
+    if let Some(directory) = options.output {
+        if let Err(message) = check_destination(directory, Path::new(&path)) {
+            eprintln!("error: {message}");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    }
+
     match inspect(&path, options) {
         Ok(Coverage::NothingAnalysed) => ExitCode::from(3),
         Ok(Coverage::Complete | Coverage::Incomplete) => ExitCode::SUCCESS,
@@ -132,7 +182,57 @@ fn main() -> ExitCode {
     }
 }
 
-fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<Coverage, taphonomy::Error> {
+/// Refuses a destination that is, or would contain, the evidence.
+///
+/// `ADR-0015` Decision B, corrected by its Appendix A.3. What must never
+/// happen is a write into the volume under analysis: free space and
+/// unrecovered evidence are the same bytes, so an artifact written there
+/// lands on deleted files that have not been recovered yet, and any write
+/// changes the digest every finding in the run is anchored to. `SAFETY.md`
+/// section 3.3 forbids it and section 4 requires a separate destination.
+///
+/// With the evidence an image file, the volume is not mounted and the host
+/// filesystem has no path into it, so the reachable case is a destination
+/// holding the evidence file itself. A destination that merely shares a
+/// filesystem with the image is permitted and draws no warning: Appendix
+/// A.2 records that established practice constrains the source filesystem
+/// rather than the device an image happens to sit on.
+///
+/// The device comparison that enforces this where the evidence is a block
+/// device is not written here, because no block device can be named as
+/// evidence yet and a check no input can reach cannot be tested.
+/// `ADR-0015` Appendix A.3 records what it is to be.
+fn check_destination(directory: &Path, evidence: &Path) -> Result<(), String> {
+    let metadata =
+        fs::metadata(directory).map_err(|e| format!("--output {}: {e}", directory.display()))?;
+
+    if !metadata.is_dir() {
+        return Err(format!(
+            "--output {} is not a directory",
+            directory.display()
+        ));
+    }
+
+    // Canonicalised, so that a destination reaching the evidence's
+    // directory by a different path is still refused.
+    let destination = directory
+        .canonicalize()
+        .map_err(|e| format!("--output {}: {e}", directory.display()))?;
+    let source = evidence
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", evidence.display()))?;
+
+    if source.parent() == Some(destination.as_path()) {
+        return Err(format!(
+            "--output {} holds the evidence",
+            directory.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn inspect(path: &std::ffi::OsStr, options: Options<'_>) -> Result<Coverage, taphonomy::Error> {
     let mut evidence = EvidenceFile::open(path)?;
     let reported = evidence.reported_size();
     let result = evidence.digest()?;
@@ -228,7 +328,7 @@ fn inspect(path: &std::ffi::OsStr, options: Options) -> Result<Coverage, taphono
 fn report_partition(
     evidence: &mut EvidenceFile,
     p: &MbrPartition,
-    options: Options,
+    options: Options<'_>,
     counts: &mut RunCounts,
 ) {
     let mut vbr = [0u8; VBR_SIZE];
@@ -351,7 +451,7 @@ fn report_root_directory(
     evidence: &mut EvidenceFile,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
-    options: Options,
+    options: Options<'_>,
     counts: &mut RunCounts,
 ) {
     let root = match enumerate_root(evidence, boot, extent) {
@@ -467,6 +567,14 @@ struct RunCounts {
     /// A deleted entry whose run was free and whose extraction failed.
     not_extracted: usize,
 
+    /// An artifact that was read and could not be handed to the operator.
+    ///
+    /// `ADR-0015` Decision G and section 9: the digest stands, because the
+    /// destination has no say in what the evidence holds, but the operator
+    /// asked for a file and has none. A written file that could not be read
+    /// back is not counted here, because the file is there.
+    not_delivered: usize,
+
     /// A deleted entry whose implied run was free in the FAT.
     free_runs: usize,
 
@@ -489,9 +597,10 @@ struct RunCounts {
 impl RunCounts {
     /// Everything the run did not analyse, counted once per occurrence.
     ///
-    /// The eleven kinds `ADR-0014` Appendix B.4 enumerates. Three of them
-    /// no fixture reaches and one no fixture can, which is why the
-    /// derivation below is unit tested rather than measured alone.
+    /// The eleven kinds `ADR-0014` Appendix B.4 enumerates, and the
+    /// twelfth `ADR-0015` section 9 adds. Three of them no fixture reaches
+    /// and one no fixture can, which is why the derivation below is unit
+    /// tested rather than measured alone.
     const fn gaps(&self) -> usize {
         self.table_unread
             + self.table_rejected
@@ -503,6 +612,7 @@ impl RunCounts {
             + self.root_unread
             + self.not_assessed
             + self.not_extracted
+            + self.not_delivered
             + self.directories_unread
     }
 
@@ -529,7 +639,7 @@ impl RunCounts {
     /// this follows from the two and is not tracked beside them. Saturating
     /// because a count that disagrees with that invariant must not panic in
     /// the middle of reporting evidence.
-    const fn artifacts(&self, options: Options) -> usize {
+    const fn artifacts(&self, options: Options<'_>) -> usize {
         if options.recover {
             self.free_runs.saturating_sub(self.not_extracted)
         } else {
@@ -538,7 +648,7 @@ impl RunCounts {
     }
 
     /// Free runs left unread because the operator did not ask to read them.
-    const fn not_read(&self, options: Options) -> usize {
+    const fn not_read(&self, options: Options<'_>) -> usize {
         if options.recover {
             return 0;
         }
@@ -547,7 +657,7 @@ impl RunCounts {
     }
 
     /// Extractions compared against a reference that did not equal it.
-    const fn differed(&self, options: Options) -> usize {
+    const fn differed(&self, options: Options<'_>) -> usize {
         if options.reference.is_some() {
             self.artifacts(options).saturating_sub(self.matched)
         } else {
@@ -600,7 +710,7 @@ fn report_recovery(
     boot: &Fat32BootSector,
     extent: VolumeExtent,
     entries: &[Entry],
-    options: Options,
+    options: Options<'_>,
     counts: &mut RunCounts,
 ) {
     let mut heading = false;
@@ -675,7 +785,15 @@ fn report_recovery(
                 println!("        {position:<9} {detail}");
 
                 if options.recover {
-                    match extract(&found, boot, extent, evidence, None) {
+                    // `ADR-0015` Decision D. The slot and the first cluster
+                    // are facts the run established; no byte of evidence
+                    // reaches the path.
+                    let destination = options.output.map(|directory| Destination {
+                        directory,
+                        slot: entry.slot,
+                    });
+
+                    match extract(&found, boot, extent, evidence, destination) {
                         Ok(extracted) => {
                             // `docs/SAFETY.md` section 10 requires the
                             // recovered-file hash and the validation hash to
@@ -690,6 +808,8 @@ fn report_recovery(
                                 extracted.bytes_hashed,
                                 options.reference,
                             );
+
+                            report_output(extracted.output.as_ref(), extracted.digest, counts);
 
                             match (validation.outcome, validation.reference) {
                                 (Outcome::Match, Some(reference)) => {
@@ -722,6 +842,56 @@ fn report_recovery(
     }
 }
 
+/// Says what became of a written artifact, where one was asked for.
+///
+/// `ADR-0015` Decision H. The comparison is made here rather than in the
+/// library, because a difference between what was read and what landed is
+/// a finding to report and not an error to raise: `ADR-0013` section 3
+/// treats a differing reference the same way, and the exit status is
+/// unchanged by either.
+fn report_output(output: Option<&Output>, digest: Sha256Digest, counts: &mut RunCounts) {
+    let Some(output) = output else {
+        return;
+    };
+
+    match output {
+        Output::Written { path, readback } => {
+            let verdict = if *readback == digest {
+                "matches what was read"
+            } else {
+                "DIFFERS from what was read"
+            };
+
+            println!("        {:<9} written {} {verdict}", "", path.display());
+        }
+        Output::Unverified { path, message } => {
+            println!(
+                "        {:<9} written {} NOT VERIFIED: {message}",
+                "",
+                path.display()
+            );
+        }
+        Output::Exists { path } => {
+            println!("        {:<9} NOT WRITTEN: {} exists", "", path.display());
+            counts.not_delivered += 1;
+        }
+        Output::Failed {
+            path,
+            message,
+            removed,
+        } => {
+            let partial = if *removed { "" } else { ", partial file left" };
+
+            println!(
+                "        {:<9} NOT WRITTEN: {}: {message}{partial}",
+                "",
+                path.display()
+            );
+            counts.not_delivered += 1;
+        }
+    }
+}
+
 /// Column the gap counts print in, set by the longest label below.
 const GAP_LABEL_WIDTH: usize = 26;
 
@@ -742,7 +912,7 @@ const GAP_LABEL_WIDTH: usize = 26;
 /// Appendix A.4 measured that such a run reports its error on stderr and
 /// says nothing on stdout, so a reader capturing stdout alone sees a digest
 /// and no indication that nothing else was analysed.
-fn print_summary(counts: &RunCounts, options: Options) {
+fn print_summary(counts: &RunCounts, options: Options<'_>) {
     println!();
     println!("coverage     {}", counts.coverage());
 
@@ -757,6 +927,7 @@ fn print_summary(counts: &RunCounts, options: Options) {
     print_gap("root directories not read", counts.root_unread);
     print_gap("entries not assessed", counts.not_assessed);
     print_gap("entries not extracted", counts.not_extracted);
+    print_gap("artifacts not written", counts.not_delivered);
     print_gap("directories not read", counts.directories_unread);
 
     // Only `--recover` produces an artifact, so without it the line would
@@ -840,7 +1011,7 @@ fn push_part(parts: &mut Vec<String>, count: usize, label: &str) {
 /// Indented to zero for the same reason. At volume indentation it would
 /// read as a statement about the last volume printed rather than about the
 /// run it now covers.
-fn print_caveats(counts: &RunCounts, options: Options) {
+fn print_caveats(counts: &RunCounts, options: Options<'_>) {
     if counts.free_runs == 0 {
         return;
     }
@@ -1008,17 +1179,19 @@ mod tests {
             .expect("64 hexadecimal characters")
     }
 
-    fn recovering(reference: Option<Sha256Digest>) -> Options {
+    fn recovering(reference: Option<Sha256Digest>) -> Options<'static> {
         Options {
             recover: true,
             reference,
+            output: None,
         }
     }
 
-    fn reporting() -> Options {
+    fn reporting() -> Options<'static> {
         Options {
             recover: false,
             reference: None,
+            output: None,
         }
     }
 
@@ -1082,9 +1255,10 @@ mod tests {
 
     #[test]
     fn every_kind_of_gap_is_counted_as_one() {
-        // The eleven kinds of Appendix B.4. Four are unreachable from any
-        // fixture, so this is the only place they are exercised.
-        let kinds: [fn(&mut RunCounts); 11] = [
+        // The eleven kinds of Appendix B.4 and the twelfth `ADR-0015`
+        // section 9 adds. Four are unreachable from any fixture, so this is
+        // the only place they are exercised.
+        let kinds: [fn(&mut RunCounts); 12] = [
             |counts| counts.table_unread += 1,
             |counts| counts.table_rejected += 1,
             |counts| counts.gpt += 1,
@@ -1095,6 +1269,7 @@ mod tests {
             |counts| counts.root_unread += 1,
             |counts| counts.not_assessed += 1,
             |counts| counts.not_extracted += 1,
+            |counts| counts.not_delivered += 1,
             |counts| counts.directories_unread += 1,
         ];
 
