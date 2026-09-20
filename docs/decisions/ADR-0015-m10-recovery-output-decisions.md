@@ -324,3 +324,84 @@ this is reconsidered again.
    asserts that writing an artifact from `fat32-fragmented-deleted.img`
    produces a file whose digest differs from the file that entry named.
    The tool writes a wrong file correctly; the record must say so.
+
+---
+
+## Appendix A: Decision B corrected before it was implemented (2026-09-21)
+
+Section 4 was written from reasoning about what could go wrong and not from
+what the field guards against. Implementing it exposed the defect before any
+code was committed. The section stands as written; this records what
+replaces it.
+
+### A.1 The rule as written refuses every ordinary run
+
+Section 4 requires that the destination not be on the filesystem holding
+the evidence, enforced by comparing `st_dev` on both. With the evidence an
+image file at `~/evidence/card.img` and the destination `~/recovered`, those
+device identifiers are equal on any single-disk machine, so the run is
+refused. That is the ordinary invocation, and the rule would have made the
+feature unusable on the day it shipped.
+
+Section 4 also contradicts itself. It prescribes the device comparison, then
+states two paragraphs later that the common case it catches is a destination
+on the same host filesystem as the image, "which is harmless". A rule whose
+own justification calls the case it catches harmless is the wrong rule.
+
+### A.2 Where established practice draws the line
+
+Researched after the defect was found, rather than before section 4 was
+written, which is the process failure here.
+
+PhotoRec's documentation states the constraint in terms of the source
+filesystem: recovered files must not be stored on the source filesystem, or
+lost data may be overwritten and definitively lost, and its project page
+puts the same rule as not writing recovered files to the partition they
+were stored on. The mechanism it gives is the one section 4 gives: writing
+recovered files creates new data that can land on blocks the tool has not
+yet scanned.
+
+Two further points bear directly on this decision.
+
+First, PhotoRec's guidance recommends imaging a critical drive with `dd` or
+similar and running the tool on the image, and places no constraint on where
+the output goes relative to that image. Once the analysis runs against an
+image, the source filesystem is inside the image and the host filesystem is
+categorically not it.
+
+Second, the destination properties that documentation does warn about are
+capacity and the destination filesystem's own limits, not which device it
+sits on. Capacity is already among the conditions `SAFETY.md` section 12
+requires the tool to fail closed on, and Decision G already handles it where
+it occurs, so it needs no decision here.
+
+Nothing found imposes the restriction section 4 imposes.
+
+### A.3 What replaces section 4's enforcement
+
+The destination must not be, and must not contain, the evidence. Two checks,
+both before the evidence is opened:
+
+* The resolved destination directory must not be the directory holding the
+  evidence file, so that no artifact can be written over the evidence.
+  `create_new` alone does not cover this: it would report the collision as
+  `Output::Exists` and continue, where the run should refuse.
+* Where the evidence is a block device, the destination must not reside on
+  that device, compared as the destination's `st_dev` against the evidence's
+  `st_rdev`. This is the check that enforces `SAFETY.md` section 3.3 in
+  substance. It is unreachable until a block device may be named as
+  evidence, and it is written now so that the milestone which allows one
+  does not have to discover it.
+
+A destination that merely shares a filesystem with an image file is
+permitted, with no warning. It is not a case established practice guards
+against, and a warning printed on every ordinary run is one operators stop
+reading.
+
+### A.4 What this does not change
+
+Decisions A and C through H stand unchanged, as does section 4's reasoning
+about why writing into the evidence is destructive: free space and
+unrecovered evidence are the same bytes, and a write changes the digest
+every finding is anchored to. What changed is only which check establishes
+that the destination is not the evidence.
