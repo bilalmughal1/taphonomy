@@ -762,3 +762,83 @@ fn three_of_the_five_recoveries_are_not_the_entrys_own_content() {
         "three of five recoveries are not the content the entry's file held"
     );
 }
+
+/// Slot order on the live-gap volume, which differs from
+/// `fat32-fragmented-deleted.img` only in what is still live.
+///
+/// `build_fragmented_volume` writes both, and this fixture omits the two
+/// `mdel` calls that free the clusters between the fragments. So `S2.BIN`
+/// and `S4.BIN` hold clusters 5 and 7, and slots 3 and 5 are live entries
+/// where the other fixture has deleted ones.
+///
+/// This test states the premise the one below depends on. If the generator
+/// changes, this fails first and says what moved.
+#[test]
+fn the_live_gap_fixture_has_the_layout_the_generator_built() {
+    let (_evidence, boot, _extent, entries) = entries("fat32-fragmented-live-gap.img");
+
+    assert_eq!(boot.geometry.cluster_bytes() as usize, CLUSTER_BYTES);
+    assert_eq!(
+        entries.len(),
+        9,
+        "a volume label, four live files, three deleted files and the filler: {entries:?}"
+    );
+
+    let (first_cluster, file_size) = deleted_short(&entries[2]);
+    assert_eq!(first_cluster, 4, "FRAG.BIN took the slot S1.BIN freed");
+    assert_eq!(file_size, FRAG_SIZE);
+
+    for (slot, cluster) in [(4usize, 6u32), (6, 8)] {
+        let (first, size) = deleted_short(&entries[slot]);
+        assert_eq!(first, cluster, "slot {slot}");
+        assert_eq!(size, CLUSTER_BYTES as u32, "slot {slot}");
+    }
+
+    for slot in [1usize, 3, 5, 7] {
+        assert!(
+            matches!(entries[slot].kind, EntryKind::ShortName { .. }),
+            "slot {slot} is live: {:?}",
+            entries[slot]
+        );
+    }
+}
+
+/// `ADR-0010` Decision C, reached from ordinary file operations.
+///
+/// `FRAG.BIN` occupied clusters 4, 6 and 8, so the run its entry implies is
+/// 4 to 6 and cluster 5 is held by the live `S2.BIN`. Contiguity is refuted
+/// by the FAT and the entry is refused before any content is read.
+///
+/// Two things make this worth asserting separately from
+/// `a_refused_run_offers_nothing_to_validate`. That test reaches a refusal
+/// through the collision fixture's poked `DIR_FileSize`; this one reaches it
+/// with no byte written by this project, which is what `EXP-0004`
+/// Appendix A.5 measured. And it is Case 2 of the canonical list in Meyer
+/// and Roy, recorded in `EXP-0004`'s external practice section, where the
+/// tools they tested recover such a file anyway because they do not refuse
+/// on an allocated cluster. It is the one arrangement in that list this tool
+/// handles correctly, and nothing in this tree measured it before.
+#[test]
+fn a_run_reaching_a_live_cluster_is_refused_without_a_poke() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-fragmented-live-gap.img");
+
+    let assessment = assess(&entries[2], &boot, extent, &mut evidence)
+        .expect("reading the FAT")
+        .expect("slot 2 is a deleted file");
+
+    let Assessment::RunBroken {
+        run,
+        first_allocated,
+    } = assessment
+    else {
+        panic!("cluster 5 is held by the live S2.BIN: {assessment:?}");
+    };
+
+    assert_eq!(run.first_cluster, 4);
+    assert_eq!(run.last_cluster(), 6);
+    assert_eq!(run.file_size, FRAG_SIZE);
+    assert_eq!(
+        first_allocated, 5,
+        "refused at the first cluster of the run a live file holds"
+    );
+}
