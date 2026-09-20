@@ -277,7 +277,7 @@ fn extraction_reproduces_the_content_the_generator_wrote() {
         panic!("slot 1 should be recoverable");
     };
 
-    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let extracted = extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
 
     let content = big_content();
     assert_eq!(
@@ -303,7 +303,7 @@ fn the_digest_covers_the_file_and_not_the_whole_run() {
         panic!("slot 1 should be recoverable");
     };
 
-    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let extracted = extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
 
     let mut whole_run = big_content();
     whole_run.resize(4 * CLUSTER_BYTES, 0);
@@ -330,7 +330,7 @@ fn a_single_cluster_deleted_file_is_recoverable() {
     assert_eq!(found.run().first_cluster, 9);
     assert_eq!(found.run().cluster_count, 1);
 
-    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let extracted = extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
     assert_eq!(
         extracted.digest,
         digest_of(b"taphonomy single cluster fix\n")
@@ -434,7 +434,7 @@ fn recovery_does_not_modify_evidence() {
     else {
         panic!("slot 1 should be recoverable");
     };
-    extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
 
     let digest_after = evidence.digest().expect("hashing after");
     let after = std::fs::metadata(&path).expect("metadata after");
@@ -459,8 +459,8 @@ fn extraction_is_deterministic() {
         panic!("slot 1 should be recoverable");
     };
 
-    let first = extract(&found, &boot, extent, &mut evidence).expect("first extraction");
-    let second = extract(&found, &boot, extent, &mut evidence).expect("second extraction");
+    let first = extract(&found, &boot, extent, &mut evidence, None).expect("first extraction");
+    let second = extract(&found, &boot, extent, &mut evidence, None).expect("second extraction");
 
     assert_eq!(first, second);
 }
@@ -489,7 +489,7 @@ fn a_recovered_run_matches_the_reference_digest() {
         panic!("slot 1 should be recoverable");
     };
 
-    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let extracted = extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
     let reference = Sha256Digest::from_hex(BIG_DIGEST_HEX).expect("the recorded digest parses");
 
     let validation = validate(extracted.digest, extracted.bytes_hashed, Some(reference));
@@ -512,7 +512,7 @@ fn a_reference_differing_in_one_character_does_not_match() {
         panic!("slot 1 should be recoverable");
     };
 
-    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let extracted = extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
 
     let mut text = BIG_DIGEST_HEX.to_string();
     text.replace_range(63.., "2");
@@ -656,7 +656,7 @@ fn the_recovery_contains_a_cluster_belonging_to_another_file() {
         panic!("slot 2 should be recoverable");
     };
 
-    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let extracted = extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
 
     assert_eq!(
         extracted.digest,
@@ -684,7 +684,7 @@ fn a_reference_to_the_fragmented_file_itself_differs() {
         panic!("slot 2 should be recoverable");
     };
 
-    let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+    let extracted = extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
     let reference = Sha256Digest::from_hex(FRAG_DIGEST_HEX).expect("the recorded digest parses");
 
     let validation = validate(extracted.digest, extracted.bytes_hashed, Some(reference));
@@ -744,7 +744,8 @@ fn three_of_the_five_recoveries_are_not_the_entrys_own_content() {
             panic!("slot {slot} should be recoverable");
         };
 
-        let extracted = extract(&found, &boot, extent, &mut evidence).expect("reading the run");
+        let extracted =
+            extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
 
         assert_eq!(
             extracted.digest,

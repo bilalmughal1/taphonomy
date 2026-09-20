@@ -19,8 +19,11 @@
 //!
 //! # Scope
 //!
-//! ADR-0010 Decision A: nothing in this module writes a file. Extraction is
-//! to memory and the result is a digest.
+//! ADR-0010 Decision A held that nothing in this module writes a file.
+//! ADR-0015 supersedes it for M10: [`extract`] writes the artifact when the
+//! caller supplies a [`Destination`], streaming it in the same pass that
+//! hashes it, and reads it back to state whether what landed matches what
+//! was read. Without a destination the behaviour is unchanged.
 //!
 //! Eligibility and the implied run are computed from the entry and the
 //! volume's geometry alone, reading nothing, so they can be tested against
@@ -28,8 +31,21 @@
 //! against it. [`extract`] reads the run's data clusters, streaming one
 //! cluster at a time, and returns a digest of the file's bytes without the
 //! bytes themselves.
+//!
+//! # Which failures stop a run
+//!
+//! ADR-0015 Decision G. A read failure in the evidence voids the
+//! extraction: the hasher did not see every byte, so there is no digest and
+//! the error is returned. A failure on the destination does not. The run
+//! read the evidence and hashed it, and a full disk says nothing about the
+//! evidence, so the digest is reported together with a statement that
+//! nothing was delivered. Everything in [`Output`] is a statement about the
+//! destination.
 
 use std::fmt;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 use crate::evidence::EvidenceReader;
@@ -375,12 +391,105 @@ pub fn assess<R: EvidenceReader>(
     Ok(Some(Assessment::Recoverable(UnallocatedRun(run))))
 }
 
+/// Where an extracted artifact is to be written.
+///
+/// The directory is the caller's, and ADR-0015 Decision B requires the
+/// caller to have established that it is not on the filesystem holding the
+/// evidence before the evidence was opened.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Destination<'a> {
+    /// Directory the artifact is created in.
+    pub directory: &'a Path,
+
+    /// Root-directory slot of the entry being recovered.
+    pub slot: usize,
+}
+
+impl Destination<'_> {
+    /// The path this artifact is written to.
+    ///
+    /// ADR-0015 Decision D. Composed from two integers the run established,
+    /// so no byte of evidence reaches the path. `SECURITY.md` section 7
+    /// requires that a recovered filename never allow a write outside the
+    /// destination; a name that cannot contain a separator, a `..` or a
+    /// leading `/` has no such failure to get wrong.
+    ///
+    /// The extension states that the content was not identified. No
+    /// validator exists, and ADR-0003 section 3.1 makes a level a property
+    /// of an artifact a validator has seen.
+    pub fn path(&self, first_cluster: u32) -> PathBuf {
+        self.directory
+            .join(format!("slot-{}-cluster-{first_cluster}.bin", self.slot))
+    }
+}
+
+/// What became of an artifact the caller asked to be written.
+///
+/// Every variant is a statement about the destination. A read failure in
+/// the evidence never reaches here; it is returned as an error.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Output {
+    /// Written, then read back and hashed.
+    ///
+    /// `readback` is the digest of the file on disk, not of what was sent
+    /// to the kernel. ADR-0015 Decision H leaves the comparison against
+    /// [`Extraction::digest`] to the caller to report: a difference is a
+    /// finding about the destination, not an error here.
+    Written {
+        /// Path written.
+        path: PathBuf,
+        /// Digest of the bytes read back from that path.
+        readback: Sha256Digest,
+    },
+
+    /// Written, and the file could not be read back.
+    ///
+    /// The file is left in place. It may be sound, and removing a
+    /// possibly-recovered artifact because the destination could not be
+    /// re-read would destroy more than it protects. ADR-0015 section 10
+    /// does not cover this case and is owed an appendix recording it.
+    Unverified {
+        /// Path written.
+        path: PathBuf,
+        /// Why the read back failed.
+        message: String,
+    },
+
+    /// A file of that name existed already and was not touched.
+    ///
+    /// ADR-0015 Decision C, which `SAFETY.md` section 15 requires: the
+    /// default behaviour preserves existing output.
+    Exists {
+        /// Path that was left alone.
+        path: PathBuf,
+    },
+
+    /// Creating or writing failed.
+    ///
+    /// ADR-0015 Decision G: any partial file is removed, because a
+    /// truncated file on disk cannot be told apart from a short file that
+    /// was recovered whole, and `SAFETY.md` section 12 forbids a failure
+    /// becoming a silent partial success.
+    Failed {
+        /// Path that was attempted.
+        path: PathBuf,
+        /// Why it failed.
+        message: String,
+        /// Whether the partial file was successfully removed.
+        ///
+        /// Reported rather than assumed. A removal can fail too, and the
+        /// tool states what it knows rather than claiming a cleanliness it
+        /// did not achieve.
+        removed: bool,
+    },
+}
+
 /// The result of reading a run's content.
 ///
-/// The content is not here. ADR-0010 Decision A: M7 extracts to memory,
-/// hashes what it extracted, and reports. Nothing is written, and nothing is
-/// returned that a caller could mistake for a recovered file.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// The content is not here. Extraction hashes what it read and reports;
+/// where a [`Destination`] was supplied the bytes also went to a file, and
+/// `output` says what became of it.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Extraction {
     /// Digest of the file's bytes, and of nothing else.
     pub digest: Sha256Digest,
@@ -398,6 +507,28 @@ pub struct Extraction {
     /// than silently dropped. Recovering it is a separate capability and is
     /// not this milestone's.
     pub slack_bytes: u32,
+
+    /// What became of the written file, where one was asked for.
+    ///
+    /// `None` when the caller supplied no [`Destination`], which is the
+    /// default invocation and the only behaviour before M10.
+    pub output: Option<Output>,
+}
+
+/// Where the bytes are going while a run is streamed.
+///
+/// Private. It exists so the loop has one thing to write to whether or not
+/// a file was opened, and so a destination failure part way through stops
+/// writing without stopping the hashing.
+enum Sink {
+    /// No destination was asked for.
+    Absent,
+    /// Open and being written.
+    Open(fs::File),
+    /// The path was taken; nothing was opened.
+    Taken,
+    /// Creating or writing failed, with the reason.
+    Broken(String),
 }
 
 /// Reads a run's content and returns a digest of it.
@@ -417,30 +548,43 @@ pub struct Extraction {
 ///
 /// The final cluster is read whole, because a cluster is the unit the volume
 /// addresses, and its slack is then excluded from the digest.
+///
+/// With a [`Destination`] the same bytes the hasher takes are written, in
+/// the same pass, so no artifact is held in memory. ADR-0015 Decisions E
+/// and F: exactly `file_size` bytes reach the file, and slack does not,
+/// which is what makes the written file comparable to the digest.
 pub fn extract<R: EvidenceReader>(
     found: &UnallocatedRun,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
     reader: &mut R,
+    destination: Option<Destination<'_>>,
 ) -> Result<Extraction, RecoveryError> {
     let run = found.run();
     let cluster_bytes = boot.geometry.cluster_bytes() as usize;
 
+    let path = destination.map(|d| d.path(run.first_cluster));
+    let mut sink = open_sink(path.as_deref());
+
     // One buffer for the whole run. `file_size` is never allocated.
     let mut buffer = vec![0u8; cluster_bytes];
     let mut hasher = Sha256Hasher::new();
-    let mut remaining = run.file_size as u64;
 
-    for cluster in run.first_cluster..=run.last_cluster() {
-        let offset = cluster_offset(boot, extent, cluster)?;
-        reader.read_exact_at(offset, &mut buffer)?;
+    let read = stream(
+        found,
+        boot,
+        extent,
+        reader,
+        &mut buffer,
+        &mut hasher,
+        &mut sink,
+    );
 
-        // The last cluster contributes only the bytes the file declares.
-        // Every earlier one contributes all of them, because the run length
-        // was computed from the same size.
-        let take = remaining.min(cluster_bytes as u64) as usize;
-        hasher.update(&buffer[..take]);
-        remaining -= take as u64;
+    if let Err(e) = read {
+        // ADR-0015 Decision G. The evidence failed, so there is no digest
+        // to report and nothing may be left behind that looks like one.
+        discard(sink, path.as_deref());
+        return Err(e);
     }
 
     let hashed = hasher.finish();
@@ -449,7 +593,138 @@ pub fn extract<R: EvidenceReader>(
         digest: hashed.digest,
         bytes_hashed: hashed.bytes_read,
         slack_bytes: run.slack_bytes,
+        output: settle(sink, path, &mut buffer),
     })
+}
+
+/// Opens the destination, if one was asked for.
+///
+/// `create_new` makes the existence check and the creation one operation,
+/// so nothing can appear between them. ADR-0015 Decision C.
+fn open_sink(path: Option<&Path>) -> Sink {
+    let Some(path) = path else {
+        return Sink::Absent;
+    };
+
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => Sink::Open(file),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Sink::Taken,
+        Err(e) => Sink::Broken(e.to_string()),
+    }
+}
+
+/// Reads the run, hashing every byte and writing those the file declares.
+///
+/// Split out so that a failure returns here and the caller can remove a
+/// partial file before propagating it.
+fn stream<R: EvidenceReader>(
+    found: &UnallocatedRun,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    reader: &mut R,
+    buffer: &mut [u8],
+    hasher: &mut Sha256Hasher,
+    sink: &mut Sink,
+) -> Result<(), RecoveryError> {
+    let run = found.run();
+    let cluster_bytes = buffer.len();
+    let mut remaining = run.file_size as u64;
+
+    for cluster in run.first_cluster..=run.last_cluster() {
+        let offset = cluster_offset(boot, extent, cluster)?;
+        reader.read_exact_at(offset, buffer)?;
+
+        // The last cluster contributes only the bytes the file declares.
+        // Every earlier one contributes all of them, because the run length
+        // was computed from the same size.
+        let take = remaining.min(cluster_bytes as u64) as usize;
+        hasher.update(&buffer[..take]);
+        remaining -= take as u64;
+
+        // The same slice, in the same pass. A write failure stops the
+        // writing and not the hashing: the digest is a fact about the
+        // evidence and the destination has no say in it.
+        if let Sink::Open(file) = sink {
+            if let Err(e) = file.write_all(&buffer[..take]) {
+                *sink = Sink::Broken(e.to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Removes a partial file after the evidence failed.
+fn discard(sink: Sink, path: Option<&Path>) {
+    if let (Sink::Open(file), Some(path)) = (sink, path) {
+        // Closed before removal, so the file is not held open on platforms
+        // that care.
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Closes the file and states what became of it.
+fn settle(sink: Sink, path: Option<PathBuf>, buffer: &mut [u8]) -> Option<Output> {
+    let path = path?;
+
+    match sink {
+        Sink::Absent => None,
+        Sink::Taken => Some(Output::Exists { path }),
+        Sink::Broken(message) => {
+            let removed = fs::remove_file(&path).is_ok();
+            Some(Output::Failed {
+                path,
+                message,
+                removed,
+            })
+        }
+        Sink::Open(file) => {
+            // Closed before it is read back, so what is hashed is what the
+            // filesystem holds rather than what a buffer still owes it.
+            let flushed = file.sync_all();
+            drop(file);
+
+            if let Err(e) = flushed {
+                return Some(Output::Unverified {
+                    path,
+                    message: e.to_string(),
+                });
+            }
+
+            // ADR-0015 Decision H. Hashing during the write proves what was
+            // handed to the kernel; this proves what landed.
+            match read_back(&path, buffer) {
+                Ok(readback) => Some(Output::Written { path, readback }),
+                Err(e) => Some(Output::Unverified {
+                    path,
+                    message: e.to_string(),
+                }),
+            }
+        }
+    }
+}
+
+/// Hashes a written file, reusing the run's buffer.
+fn read_back(path: &Path, buffer: &mut [u8]) -> io::Result<Sha256Digest> {
+    use std::io::Read;
+
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256Hasher::new();
+
+    loop {
+        let read = file.read(buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(hasher.finish().digest)
 }
 
 #[cfg(test)]
@@ -954,7 +1229,8 @@ mod tests {
         write_cluster_bytes(&mut image, 4, content);
 
         let found = recoverable(&deleted_file(4, content.len() as u32), &boot, &mut image);
-        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+        let extracted =
+            extract(&found, &boot, extent(), &mut image, None).expect("the run is readable");
 
         assert_eq!(extracted.digest, digest_of(content));
         assert_eq!(extracted.bytes_hashed, content.len() as u64);
@@ -973,7 +1249,8 @@ mod tests {
         write_cluster_bytes(&mut image, 4, &cluster);
 
         let found = recoverable(&deleted_file(4, content.len() as u32), &boot, &mut image);
-        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+        let extracted =
+            extract(&found, &boot, extent(), &mut image, None).expect("the run is readable");
 
         assert_eq!(extracted.digest, digest_of(content));
         assert_ne!(
@@ -1001,7 +1278,8 @@ mod tests {
 
         let size = CLUSTER_BYTES * 2 + third.len();
         let found = recoverable(&deleted_file(4, size as u32), &boot, &mut image);
-        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+        let extracted =
+            extract(&found, &boot, extent(), &mut image, None).expect("the run is readable");
 
         let mut expected = Vec::new();
         expected.extend_from_slice(&first);
@@ -1027,7 +1305,8 @@ mod tests {
 
         let size = CLUSTER_BYTES * 2;
         let found = recoverable(&deleted_file(4, size as u32), &boot, &mut image);
-        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+        let extracted =
+            extract(&found, &boot, extent(), &mut image, None).expect("the run is readable");
 
         let mut reversed = Vec::new();
         reversed.extend_from_slice(&second);
@@ -1044,7 +1323,8 @@ mod tests {
         let mut image = MemoryImage::new(IMAGE_BYTES);
 
         let found = recoverable(&deleted_file(4, 100), &boot, &mut image);
-        let extracted = extract(&found, &boot, extent(), &mut image).expect("the run is readable");
+        let extracted =
+            extract(&found, &boot, extent(), &mut image, None).expect("the run is readable");
 
         assert_eq!(extracted.digest, digest_of(&[0u8; 100]));
     }
@@ -1056,7 +1336,7 @@ mod tests {
         let found = recoverable(&deleted_file(4, 30), &boot, &mut full);
 
         let mut truncated = MemoryImage::new(CLUSTER2_BASE);
-        let result = extract(&found, &boot, extent(), &mut truncated);
+        let result = extract(&found, &boot, extent(), &mut truncated, None);
 
         assert!(
             matches!(result, Err(RecoveryError::Evidence(_))),

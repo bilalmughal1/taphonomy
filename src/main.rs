@@ -675,7 +675,7 @@ fn report_recovery(
                 println!("        {position:<9} {detail}");
 
                 if options.recover {
-                    match extract(&found, boot, extent, evidence) {
+                    match extract(&found, boot, extent, evidence, None) {
                         Ok(extracted) => {
                             // `docs/SAFETY.md` section 10 requires the
                             // recovered-file hash and the validation hash to
