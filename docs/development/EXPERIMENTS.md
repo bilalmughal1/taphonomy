@@ -1392,3 +1392,251 @@ and Appendix A.3's attribution of the method to NIST's Forced Overwrite all
 stand as written. `ADR-0010` Appendix D stands in full. No finding here
 concerns what the tool recovers, refuses or validates, and none of it
 changes a decision.
+
+---
+
+## EXP-0005: What survives inside a deleted FAT32 directory
+
+**Date:** 2026-09-22
+**Milestone:** prerequisite to subdirectory traversal, whose ADR is not yet
+written
+**Related:** ADR-0006 §5.1, §6; ADR-0014 Appendix B.2; ADR-0015 §12;
+EXP-0003; EXP-0004; `KNOWN_ISSUES.md`
+
+---
+
+### Question
+
+1. When `mdeltree` deletes a directory, what survives inside it: its own
+   `.` and `..` entries, the entries of the files it held, and a directory
+   nested within it?
+2. Where a deleted directory occupied more than one cluster, can its later
+   clusters be located from the evidence?
+3. What distinguishes a deleted directory's first cluster from other bytes?
+4. What does the tool report on such a volume today?
+
+### Why it matters
+
+`ADR-0014` Appendix B.2 records the tool's non-conformance with DFR-CR-01:
+it lists a directory and does not read it, so deleted entries inside a
+directory are not identified, and on a DCF camera card no image file sits in
+the root. Every directory in the current fixture set is empty: `/logs` is
+made with `mmd`, `/gone` is removed with `mrd`, and the generator copies no
+file into any subdirectory. Reading subdirectories against today's fixtures
+would close the reported gap and find nothing.
+
+`ADR-0015` §12 states that the measurements for reading subdirectories are
+recorded in this document. At the time only EXP-0003 finding 6 was: `.` and
+`..` survive `mrd` and `mdeltree` in one directory holding one file. The
+rest existed in a session handover, which is not tracked. This record makes
+them tracked.
+
+### Hypothesis
+
+Stated before the volumes below were built, from measurements on a bare
+volume taken earlier the same day and not recorded:
+
+1. `mdeltree` marks each contained entry deleted by its first byte and
+   leaves the rest of every directory cluster intact, `.` and `..` included.
+2. `..` in a directory whose parent is the root holds cluster 0.
+3. A directory that grows after other files were allocated takes a second
+   cluster that is not adjacent to its first, and once the chain is zeroed
+   nothing in the volume locates that second cluster.
+4. Allocation: `GONE` at 3 and `DEEP` at 6; `BIG` at 3 then 20, `PAYLOAD.BIN`
+   at 4 to 18, `TAIL` at 19.
+5. The tool reports each volume as incompletely covered, with one directory
+   not read, no unrecovered entry, and exit status 0.
+
+The session handover recorded the split directory at clusters 3 and 19, from
+a construction it did not record. It is not reproduced here and this record
+supersedes it.
+
+### Input
+
+Two volumes with the geometry of every fixture in the set: 131,072 sectors
+of 512 bytes, one partition at LBA 2048, FAT32 over the remainder, one
+sector per cluster. Every file's content is its own name.
+
+`subtree.img` holds a directory `GONE` containing `ALPHA.TXT`, `BETA.TXT`
+and a directory `DEEP` containing `GAMMA.TXT`. `GONE` is then removed with
+`mdeltree`.
+
+`split.img` holds a directory `BIG`, then a 7,680-byte `PAYLOAD.BIN` in the
+root, fifteen clusters, then fourteen empty files in `BIG`, which with `.`
+and `..` fill all sixteen slots of its first cluster, then a directory
+`BIG/TAIL` containing `OMEGA.TXT`. `BIG` is then removed with `mdeltree`.
+
+### Environment
+
+Two environments, with the same package versions measured by
+`dpkg-query`:
+
+```text
+mtools       4.0.43-1build1
+dosfstools   4.2-1.1build1
+util-linux   2.39.3-9ubuntu6.6
+```
+
+An Ubuntu 24.04.4 container off the development machine, and the
+development machine itself. The tool was run on the development machine
+only, at `e9d0037`.
+
+### Method
+
+`SOURCE_DATE_EPOCH=1577836800`, `TZ=UTC` and `MTOOLS_SKIP_CHECK=1`, as
+`ADR-0006` §6 Condition 1 requires. The partition table is written by
+`sfdisk` and the volume by
+`mkfs.vfat --invariant --mbr=n -F 32 -n TAPHFIX --offset=2048`, the
+generator's own invocation, with disk signatures `0xfa7300e1` and
+`0xfa7300e2`. With `V` the image at byte offset 1,048,576:
+
+```text
+subtree.img   mmd ::/GONE
+              mcopy alpha ::/GONE/ALPHA.TXT
+              mcopy beta  ::/GONE/BETA.TXT
+              mmd ::/GONE/DEEP
+              mcopy gamma ::/GONE/DEEP/GAMMA.TXT
+              mdeltree ::/GONE
+
+split.img     mmd ::/BIG
+              mcopy payload ::/PAYLOAD.BIN
+              mcopy empty ::/BIG/E01.TXT  ... ::/BIG/E14.TXT
+              mmd ::/BIG/TAIL
+              mcopy omega ::/BIG/TAIL/OMEGA.TXT
+              mdeltree ::/BIG
+```
+
+Each volume was built twice per run and compared byte for byte, and the
+whole run was repeated in each environment. `mshowfat` read every chain
+before deletion. After deletion `mtools` no longer lists a deleted
+directory, so its clusters were read from the image by a short reader
+independent of the tool, which decodes each 32-byte slot. The tool was then
+run on each image with no arguments.
+
+### Expected result
+
+As hypothesised: every chain as in Hypothesis 4, every contained entry
+surviving with only its first byte changed, and the tool reporting one
+unread directory and nothing about the four files at depth.
+
+### Actual result
+
+**Determinism.** Every build of each image was identical, in both
+environments:
+
+```text
+325a622096263e879e887766bb6a09aa1a60d144c45ebd0926e186786d8d4e2a  subtree.img
+ed53e14917494a2790f64cd0c857201fcdbb039a080adb323c14c4ff80617340  split.img
+```
+
+The tool's own digest of each image agreed.
+
+**Chains before deletion,** exactly as predicted:
+
+```text
+::/GONE <3>                  ::/BIG <3> <20>
+::/GONE/ALPHA.TXT <4>        ::/PAYLOAD.BIN <4-18>
+::/GONE/BETA.TXT <5>         ::/BIG/TAIL <19>
+::/GONE/DEEP <6>             ::/BIG/TAIL/OMEGA.TXT <21>
+::/GONE/DEEP/GAMMA.TXT <7>
+```
+
+**After deletion,** every directory cluster's FAT entry reads 0. In every
+contained entry the first byte reads `0xE5`, and the rest of the name, the
+first cluster and the size survive. Other fields were not compared:
+
+| Cluster | Held | Slots after deletion |
+| --- | --- | --- |
+| 3, `subtree.img` | `GONE` | `.`→3, `..`→0, deleted `ALPHA` →4 size 10, deleted `BETA` →5 size 9, deleted directory `DEEP` →6, terminator at slot 5 |
+| 6, `subtree.img` | `DEEP` | `.`→6, `..`→3, deleted `GAMMA` →7 size 10, terminator at slot 3 |
+| 3, `split.img` | `BIG`, first | `.`→3, `..`→0, fourteen deleted empty files at cluster 0 size 0, **no terminator** |
+| 20, `split.img` | `BIG`, second | deleted directory `TAIL` →19 at slot 0, terminator at slot 1, **no `.` or `..`** |
+| 19, `split.img` | `TAIL` | `.`→19, `..`→3, deleted `OMEGA` →21 size 10, terminator at slot 3 |
+
+`.` and `..` stay unmarked in a deleted directory, as EXP-0003 finding 6
+measured for one directory. `TAIL`'s `..` names cluster 3, `BIG`'s first,
+not 20.
+
+Cluster 4, the one adjacent to `BIG`'s first, read as if it continued
+`BIG`: sixteen entries, none marked deleted, none a terminator, each made of
+`PAYLOAD.BIN`'s text, with first clusters between 1,095,699,022 and
+1,229,081,689 on a volume the tool reports as holding 127,006.
+
+**What the tool reports.** On both images, abridged:
+
+```text
+      c2 s1     deleted       directory, cluster 3, first byte destroyed, no long name survives
+      deleted content
+        c2 s1     no content: a deleted directory, not a file
+
+coverage     incomplete
+  volumes analysed           1
+  directories not read       1
+```
+
+Exit status 0 on both, and no `unrecovered` line.
+
+### Conclusion
+
+Every hypothesis held. What the measurements establish:
+
+1. **A deleted subtree survives whole.** Four deleted files sit at depths
+   one and two, each with its first cluster and size intact: `ALPHA`, `BETA`
+   and `GAMMA` in `subtree.img` and `OMEGA` in `split.img`. The tool
+   reports none of them, and its only indication that they exist is one
+   gap line per volume.
+2. **A deleted directory's first cluster is self-identifying.** Slot 0 is
+   `.` naming that same cluster, and slot 1 is `..`.
+3. **`..` holding 0 means the root.** The FAT specification requires it
+   where the parent is the root directory. Read as a cluster number it is
+   out of range, and it is not an error.
+4. **A later cluster of a deleted directory is unreachable.** It carries no
+   `.` or `..`, the FAT chain that named it is zeroed, and no entry anywhere
+   points to it: `TAIL`'s `..` names the first cluster. Here that cluster
+   holds the only entry leading to `TAIL` and `OMEGA.TXT`.
+5. **The first cluster says whether the listing may continue.** `GONE`'s
+   first cluster holds a terminator; `BIG`'s is full and holds none. A
+   terminator ends a directory, so its presence proves the listing
+   complete. Its absence proves only that the directory may have continued,
+   not that it did: a directory exactly one cluster long also has none.
+6. **Adjacency is not continuation.** Reading the next cluster as the
+   directory's continuation returned sixteen entries that look live and
+   point billions of clusters beyond the volume.
+
+The fourteen deleted empty files have first cluster 0, which the FAT
+specification sets for a zero-length file. The tool already refuses such
+an entry as empty.
+
+### Limitations
+
+1. One cluster size. A larger cluster holds more entries, so a directory
+   needs more of them before it takes a second cluster.
+2. Deletion by `mdeltree` only. Deletion by another implementation is not
+   measured.
+3. 8.3 names only. Long-name entries inside a deleted directory are not
+   measured.
+4. No case where a deleted directory's first cluster was reallocated and
+   overwritten, which would make item 2's check the only defence.
+5. The directory clusters were decoded by a reader written for this record,
+   not by the tool. What the tool's own enumeration makes of them is
+   unmeasured until it reads them.
+
+### External practice
+
+The Microsoft FAT specification requires a `..` entry to hold its parent's
+first cluster and to hold 0 where the parent is the root, sets a
+zero-length file's first cluster to 0, and records that the root directory
+itself holds neither `.` nor `..`.
+
+The Sleuth Kit added recursion into deleted directories to `fls` in 2004,
+behind its `-r` flag, as the Sleuth Kit Informer's fourteenth issue
+records. fatcat extracts a deleted directory given its cluster number. Both
+read inside a deleted directory, and this tool does not.
+
+### Next action
+
+1. Record the subdirectory traversal decisions in an ADR citing this
+   record.
+2. Add a fixture built by this construction to
+   `scripts/generate-fixtures.sh`, so that the gap closes against a volume
+   where reading subdirectories finds something.
