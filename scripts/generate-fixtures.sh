@@ -13,6 +13,7 @@
 #   sgdisk                  gdisk
 #   mkfs.vfat               dosfstools
 #   mcopy, mmd, mdel, mrd   mtools
+#   mdeltree                mtools
 #   minfo, mshowfat         mtools
 #   od, sha256sum           coreutils
 #   truncate, tr            coreutils
@@ -60,6 +61,7 @@ require mcopy "apt install mtools"
 require mmd "apt install mtools"
 require mdel "apt install mtools"
 require mrd "apt install mtools"
+require mdeltree "apt install mtools"
 require minfo "apt install mtools"
 require mshowfat "apt install mtools"
 require sha256sum coreutils
@@ -911,6 +913,142 @@ fixture_fat32_fragmented_live_gap() {
     note "file still holding a cluster inside the run it implies"
 }
 
+# Fails the run unless mshowfat reports the chain this fixture exists for.
+#
+# A geometry or allocation change that moved these directories would leave
+# images that pass every structural check and test nothing, which is
+# ADR-0008 section 8.1's "proves versus illustrates" problem.
+expect_chain() {
+    local img="$1" path="$2" expected="$3" chain
+    chain="$(MTOOLS_SKIP_CHECK=1 mshowfat -i "$img" "$path")"
+    if [ "$chain" != "$expected" ]; then
+        printf 'error: unexpected chain: %s, expected %s\n' \
+            "$chain" "$expected" >&2
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 21. FAT32 volume holding a deleted directory with a deleted subtree inside.
+#
+#     EXP-0005's subtree construction. /GONE holds ALPHA.TXT, BETA.TXT and
+#     the directory DEEP, which holds GAMMA.TXT, and mdeltree removes the
+#     lot. Every entry inside survives with only its first byte changed, so
+#     three recoverable files sit at depths one and two. Until subdirectories
+#     are read the tool reports one unread directory and none of the three.
+#
+#     Every file's content is its own name, so a recovered digest can be
+#     checked against the content without trusting the tool.
+#
+#     ADR-0016 section 11, conditions 1 and 2.
+# ---------------------------------------------------------------------------
+fixture_fat32_deleted_subtree() {
+    local path="$OUT_DIR/fat32-deleted-subtree.img"
+    printf 'fat32-deleted-subtree.img\n'
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa73000d
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work img name
+    work="$(mktemp -d)"
+    img="${path}@@${VBR_OFFSET}"
+
+    for name in ALPHA BETA GAMMA; do
+        printf '%s.TXT\n' "$name" > "$work/$name"
+    done
+
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/GONE
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/ALPHA" ::/GONE/ALPHA.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/BETA" ::/GONE/BETA.TXT
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/GONE/DEEP
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/GAMMA" ::/GONE/DEEP/GAMMA.TXT
+
+    expect_chain "$img" ::/GONE "::/GONE <3>"
+    expect_chain "$img" ::/GONE/DEEP "::/GONE/DEEP <6>"
+
+    MTOOLS_SKIP_CHECK=1 mdeltree -i "$img" ::/GONE
+
+    rm -rf "$work"
+
+    note "a deleted directory holding two deleted files and a deleted"
+    note "subdirectory holding a third"
+}
+
+# ---------------------------------------------------------------------------
+# 22. FAT32 volume holding a deleted directory whose two clusters are not
+#     adjacent.
+#
+#     EXP-0005's split construction. /BIG takes cluster 3, PAYLOAD.BIN takes
+#     4 to 18, fourteen empty files fill the sixteen slots of BIG's first
+#     cluster with . and .., and BIG/TAIL then takes 19 before BIG extends
+#     to 20. mdeltree removes BIG.
+#
+#     BIG's first cluster holds no terminator, and its second is reachable
+#     from nothing: its chain is zeroed and it carries no . or .. entry. It
+#     held the only entry leading to TAIL and OMEGA.TXT. On this volume a
+#     listing that may continue is a coverage gap, and the cluster adjacent
+#     to BIG's first is PAYLOAD.BIN's data, not BIG's continuation.
+#
+#     ADR-0016 section 11, conditions 1 and 3.
+# ---------------------------------------------------------------------------
+fixture_fat32_deleted_split_directory() {
+    local path="$OUT_DIR/fat32-deleted-split-directory.img"
+    printf 'fat32-deleted-split-directory.img\n'
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa73000e
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work img i
+    work="$(mktemp -d)"
+    img="${path}@@${VBR_OFFSET}"
+
+    # 640 lines of 12 bytes: 7,680 bytes, fifteen 512-byte clusters. One
+    # printf rather than a pipe, because under pipefail a pipe from yes
+    # fails when head closes it.
+    printf 'PAYLOAD.BIN\n%.0s' $(seq 640) > "$work/payload"
+    : > "$work/empty"
+    printf 'OMEGA.TXT\n' > "$work/omega"
+
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/BIG
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/payload" ::/PAYLOAD.BIN
+    for i in $(seq -w 1 14); do
+        MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/empty" "::/BIG/E$i.TXT"
+    done
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/BIG/TAIL
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/omega" ::/BIG/TAIL/OMEGA.TXT
+
+    expect_chain "$img" ::/BIG "::/BIG <3> <20>"
+    expect_chain "$img" ::/PAYLOAD.BIN "::/PAYLOAD.BIN <4-18>"
+    expect_chain "$img" ::/BIG/TAIL "::/BIG/TAIL <19>"
+
+    MTOOLS_SKIP_CHECK=1 mdeltree -i "$img" ::/BIG
+
+    rm -rf "$work"
+
+    note "a deleted directory whose two clusters are not adjacent, the"
+    note "second reachable from nothing"
+}
+
 # ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
@@ -935,6 +1073,8 @@ fixture_fat32_recover_run
 fixture_fat32_recover_collision
 fixture_fat32_fragmented_deleted
 fixture_fat32_fragmented_live_gap
+fixture_fat32_deleted_subtree
+fixture_fat32_deleted_split_directory
 
 # ---------------------------------------------------------------------------
 # Manifest
