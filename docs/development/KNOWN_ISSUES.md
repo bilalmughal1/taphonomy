@@ -179,7 +179,34 @@ not the case the requirement is about.
 
 ---
 
-## Three test suites are dominated by whole-image reads
+## The output path has one unmet decision and two untested failures
+
+With `--output`, each artifact is written, flushed, read back and compared
+with the digest taken from the evidence. `ADR-0015` Appendix B records what
+remains open after the corrections at `7c127a2`.
+
+**A failed removal after an evidence failure is not reported.** When the
+evidence fails part way through an artifact, the partial file is removed on
+a best-effort basis and the run reports the read error. If the removal
+fails as well, the partial file stays in the destination and nothing says
+so. `ADR-0015` section 9 requires both failures to be reported. Reaching it
+takes a failure in the evidence and one in the destination at once, and no
+test does.
+
+**Two outcomes are untested.** A failed flush is reported as not written and
+the file is removed. A written file that cannot be read back is reported as
+`NOT VERIFIED` and left in place. Neither can be reached without a failing
+device, so both are reasoned from the code rather than measured.
+
+**The read-back does not reach the storage medium.** It establishes what the
+destination filesystem returns for the file after a successful flush, which
+on Linux is normally served from the page cache. "matches what was read"
+means that, and not that the medium holds the bytes. Reading past the cache
+would need `unsafe` code or a new dependency, and neither is adopted.
+
+---
+
+## Four test suites are dominated by whole-image reads
 
 `tests/cli_arguments.rs` runs the binary rather than calling into the
 crate, because argument handling and exit status are decisions `main`
@@ -191,21 +218,29 @@ before it reports anything.
 and the exit status derived from it are decided once per run. Its eight
 tests spawn it eleven times, and every one of those hashes an image.
 
+`tests/recovery_output.rs` runs the binary because the destination checks
+are decisions `main` makes before the library is called. Six of its seven
+tests hash a 64 MB fixture. The seventh is refused before the evidence is
+opened.
+
 `tests/fat32_recovery_fixtures.rs` is comparable, and for a different
 reason. It calls into the crate and spawns no process, so the cost is not
-the binary: it is opening 64 MB fixtures. Measured 2026-09-19:
+the binary: it is opening 64 MB fixtures. Measured 2026-09-22 at `3f14a7f`:
 
 ```text
-tests/coverage_reporting.rs       8 tests  24.11s
-tests/cli_arguments.rs           11 tests  15.90s
-tests/fat32_recovery_fixtures.rs 22 tests   8.37s
+tests/coverage_reporting.rs       8 tests  22.08s
+tests/cli_arguments.rs           11 tests  16.42s
+tests/recovery_output.rs          7 tests  13.15s
+tests/fat32_recovery_fixtures.rs 24 tests   8.22s
 ```
 
-Every other suite in the workspace finishes in under a tenth of a second,
-and `cargo test --workspace` now takes about 48 seconds, of which those
-three are 48.
+Every other harness in the workspace finishes in under a tenth of a second,
+and the nine of them together took 0.13 seconds in that run. Wall times vary
+between runs: the same day at `a38a8cb`, `coverage_reporting` took 31.82
+seconds.
 
 A fixture small enough for tests that only need an argument decision would
-address the first and not the second. Reaching those decisions without a
-whole-image read would address the first only. Neither is needed yet, but
-the entry should not be read as naming a single suite.
+help the three suites that run the binary and not
+`tests/fat32_recovery_fixtures.rs`. Reaching those decisions without a
+whole-image read would likewise help only the three. Neither is needed yet,
+but the entry should not be read as naming a single suite.
