@@ -317,6 +317,22 @@ pub enum RecoveryError {
     /// the shared helpers. This one is a read this module made itself, and
     /// keeping them apart records where the failure happened.
     Evidence(Error),
+
+    /// The evidence failed part way through an artifact, and the partial
+    /// file could not be removed.
+    ///
+    /// ADR-0015 section 9 requires both failures to be reported. The
+    /// evidence failure is the cause and voids the digest, so it is kept
+    /// and is this error's source; the removal failure is a statement
+    /// about the destination, carried beside it rather than in its place.
+    PartialLeft {
+        /// The evidence failure.
+        cause: Box<RecoveryError>,
+        /// The partial file that remains in the destination.
+        path: PathBuf,
+        /// Why it could not be removed.
+        removal: String,
+    },
 }
 
 impl From<DirectoryError> for RecoveryError {
@@ -336,6 +352,15 @@ impl fmt::Display for RecoveryError {
         match self {
             RecoveryError::Directory(e) => write!(f, "{e}"),
             RecoveryError::Evidence(e) => write!(f, "{e}"),
+            RecoveryError::PartialLeft {
+                cause,
+                path,
+                removal,
+            } => write!(
+                f,
+                "{cause}; partial file {} left: {removal}",
+                path.display()
+            ),
         }
     }
 }
@@ -345,6 +370,7 @@ impl std::error::Error for RecoveryError {
         match self {
             RecoveryError::Directory(e) => Some(e),
             RecoveryError::Evidence(e) => Some(e),
+            RecoveryError::PartialLeft { cause, .. } => Some(&**cause),
         }
     }
 }
@@ -604,8 +630,16 @@ pub fn extract<R: EvidenceReader>(
     if let Err(e) = read {
         // ADR-0015 Decision G. The evidence failed, so there is no digest
         // to report and nothing may be left behind that looks like one.
-        discard(sink, path.as_deref());
-        return Err(e);
+        // Where something is left behind anyway, section 9 requires both
+        // failures to be reported.
+        return Err(match (discard(sink, path.as_deref()), path) {
+            (Some(removal), Some(path)) => RecoveryError::PartialLeft {
+                cause: Box::new(e),
+                path,
+                removal,
+            },
+            _ => e,
+        });
     }
 
     let hashed = hasher.finish();
@@ -679,29 +713,38 @@ fn stream<R: EvidenceReader>(
     Ok(())
 }
 
-/// Removes a partial file after the evidence failed.
+/// Removes a partial file after the evidence failed, and says why not
+/// where it could not.
 ///
 /// Both sinks that created a file are removed. A write that failed before
 /// the read did leaves a truncated file just as surely as an open one, and
 /// ADR-0015 Decision G removes the file on any error after it is created.
-/// The removal is best effort because the read error is what the caller
-/// reports, and the evidence error voids the extraction either way.
-fn discard(sink: Sink, path: Option<&Path>) {
-    let Some(path) = path else {
-        return;
-    };
+/// Section 9 also requires that a failed removal be reported beside the
+/// evidence failure, so its reason is returned for the caller to carry.
+fn discard(sink: Sink, path: Option<&Path>) -> Option<String> {
+    let path = path?;
 
     match sink {
         Sink::Open(file) => {
             // Closed before removal, so the file is not held open on
             // platforms that care.
             drop(file);
-            let _ = fs::remove_file(path);
+            remove_partial(path)
         }
-        Sink::Broken(_) => {
-            let _ = fs::remove_file(path);
-        }
-        Sink::Absent | Sink::Taken | Sink::Unopened(_) => {}
+        Sink::Broken(_) => remove_partial(path),
+        Sink::Absent | Sink::Taken | Sink::Unopened(_) => None,
+    }
+}
+
+/// Removes a file this run created, returning why it remains if it does.
+///
+/// A file already gone is not a failure: nothing is left behind, which is
+/// what the removal was for.
+fn remove_partial(path: &Path) -> Option<String> {
+    match fs::remove_file(path) {
+        Ok(()) => None,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => Some(e.to_string()),
     }
 }
 
