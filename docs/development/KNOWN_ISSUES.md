@@ -179,24 +179,23 @@ not the case the requirement is about.
 
 ---
 
-## The output path has one unmet decision and two untested failures
+## Three output-path outcomes are untested end to end
 
 With `--output`, each artifact is written, flushed, read back and compared
-with the digest taken from the evidence. `ADR-0015` Appendix B records what
-remains open after the corrections at `7c127a2`.
+with the digest taken from the evidence. `ADR-0015` Appendices B and C
+record what remains open.
 
-**A failed removal after an evidence failure is not reported.** When the
-evidence fails part way through an artifact, the partial file is removed on
-a best-effort basis and the run reports the read error. If the removal
-fails as well, the partial file stays in the destination and nothing says
-so. `ADR-0015` section 9 requires both failures to be reported. Reaching it
-takes a failure in the evidence and one in the destination at once, and no
-test does.
+**A failed flush and an unreadable written file.** A failed flush is
+reported as not written and the file is removed. A written file that cannot
+be read back is reported as `NOT VERIFIED` and left in place. Neither can be
+reached without a failing device, so both are reasoned from the code rather
+than measured.
 
-**Two outcomes are untested.** A failed flush is reported as not written and
-the file is removed. A written file that cannot be read back is reported as
-`NOT VERIFIED` and left in place. Neither can be reached without a failing
-device, so both are reasoned from the code rather than measured.
+**A partial file that survives an evidence failure.** When the evidence
+fails part way through an artifact and the partial file cannot be removed,
+the run reports both, as `ADR-0015` section 9 requires. The reporting is
+tested, but not the path through the whole extraction: no single directory
+can allow a file to be created and then refuse its removal without root.
 
 **The read-back does not reach the storage medium.** It establishes what the
 destination filesystem returns for the file after a successful flush, which

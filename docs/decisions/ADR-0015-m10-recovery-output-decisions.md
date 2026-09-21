@@ -549,3 +549,44 @@ Decisions A to G stand, and Decision H stands with its claim read as B.3
 states it. Section 9's distinction between a read failure,
 which voids the digest, and a destination failure, which does not, is what
 the corrections in B.1 implement. Appendix A stands in full.
+
+---
+
+## Appendix C: Section 9's reporting requirement met (2026-09-22)
+
+Appendix B.6 recorded that on the read-failure path a removal that failed
+went unreported, against section 9's requirement that both failures be
+reported. It is now met. Appendix B stands as written; this records the
+change B.6 left for its own commit.
+
+### C.1 What changed at `013be42`
+
+`discard` returns why a partial file remains instead of dropping the
+reason, and a file already gone counts as removed. Where the evidence has
+failed and the removal fails too, `extract` returns
+`RecoveryError::PartialLeft`, carrying the evidence failure as its cause and
+as its source, the path of the file left behind, and the reason. The run
+prints it as it prints any extraction failure, `NOT EXTRACTED:` followed by
+the evidence failure and the file left, and counts it under the same gap.
+Where the removal succeeds the error is exactly what it was.
+
+The evidence failure stays primary because it is what voids the digest.
+Keeping the second failure beside it rather than discarding it follows the
+motivation PEP 3134 records: an exception raised while another is being
+handled otherwise loses the first. Here the loss ran the other way, and
+the destination's failure was the one dropped.
+
+### C.2 Tests, measured at `2c6354e`
+
+`a_partial_file_that_cannot_be_removed_is_reported` makes the destination
+read-only, with a control assertion as in `tests/read_only.rs`, and asserts
+that `discard` returns the failure and that the file remains.
+`a_partial_file_left_is_reported_beside_the_evidence_failure` asserts that
+the message carries the evidence failure, the file and the reason, and that
+the source is the evidence failure. The existing callers of `discard` assert
+that nothing is reported when removal succeeds or does not apply. The suite
+is 271 tests across thirteen `test result` lines, lib 157.
+
+**Untested:** the path through `extract` as a whole. No single directory
+can allow a file to be created and then refuse its removal without root.
+B.5's untested flush failure and `Output::Unverified` are unchanged.
