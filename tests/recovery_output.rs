@@ -1,10 +1,10 @@
 //! Writing a recovered artifact to a destination.
 //!
 //! `ADR-0015` section 13's six conditions before M10 may claim to write a
-//! recovered file. Every test runs the binary rather than calling into the
-//! crate, because three of the six are decisions `main` makes about `argv`
-//! or about the destination, and none of those is observable from the
-//! library.
+//! recovered file, and one destination failure section 13 did not list.
+//! Every test runs the binary rather than calling into the crate, because
+//! three of the six are decisions `main` makes about `argv` or about the
+//! destination, and none of those is observable from the library.
 //!
 //! The fixtures are generated and not committed. Run
 //! `./scripts/generate-fixtures.sh` first.
@@ -269,4 +269,59 @@ fn a_fragmented_file_is_written_whole_and_is_not_the_file() {
     // artifact's size tells an operator it is the wrong content.
     let size = fs::metadata(&artifact).expect("the artifact").len();
     assert_eq!(size, 1_536);
+}
+
+/// A destination that cannot be written reports each artifact as not
+/// created, and claims no partial file.
+///
+/// Not one of section 13's conditions. `ADR-0015` Decision G distinguishes
+/// the failures, and before `7c127a2` this run printed "partial file left"
+/// for files that were never created. The digest still stands, because the
+/// destination has no say in what the evidence holds.
+///
+/// Unix-specific because it relies on permission bits, as
+/// `tests/read_only.rs` does. The control assertion below proves the
+/// directory genuinely rejects a new file, so a pass cannot come from a
+/// permission change that did nothing, which is what running as root
+/// would produce.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_destination_is_reported_without_a_partial_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scratch("unwritable");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))
+        .expect("making the destination read-only");
+
+    let control = fs::File::create(dir.join("probe"));
+    let accepted = control.is_ok();
+    if accepted {
+        let _ = fs::remove_file(dir.join("probe"));
+    }
+
+    let output = run(&[
+        &fixture("fat32-recover-run.img"),
+        "--recover",
+        "--output",
+        dir.to_str().expect("a utf-8 scratch path"),
+    ]);
+
+    // Restored before any assertion, so a failure cannot leave behind a
+    // directory the next run's scratch() is unable to remove.
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
+        .expect("restoring the destination");
+
+    assert!(
+        !accepted,
+        "control failed: the directory accepted a new file, so this test proves nothing"
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let text = stdout(&output);
+    assert!(text.contains("could not be created"), "{text}");
+    assert!(!text.contains("partial file left"), "{text}");
+    assert!(text.contains("artifacts not written"), "{text}");
+    assert!(text.contains(BIG_DIGEST_HEX), "{text}");
+    assert!(written_files(&dir).is_empty());
 }

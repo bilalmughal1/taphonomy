@@ -1387,4 +1387,147 @@ mod tests {
             "expected an evidence read failure, got {result:?}"
         );
     }
+
+    /// An empty directory of this test's own under the system temporary
+    /// directory, removed first so a previous run cannot decide this one.
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("taphonomy-unit-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("creating the scratch directory");
+        dir
+    }
+
+    /// ADR-0015 Decision G. The evidence fails on the second cluster, after
+    /// the first has been written, and no truncated file may remain.
+    ///
+    /// The control runs the same entry against the whole image, so a pass
+    /// cannot come from a destination that was never written at all.
+    #[test]
+    fn a_read_failure_part_way_through_leaves_no_partial_file() {
+        let boot = boot();
+        let mut full = MemoryImage::new(IMAGE_BYTES);
+        let size = (CLUSTER_BYTES * 2) as u32;
+        let found = recoverable(&deleted_file(4, size), &boot, &mut full);
+
+        let control = scratch("read-failure-control");
+        let destination = Destination {
+            directory: &control,
+            slot: 1,
+        };
+        extract(&found, &boot, extent(), &mut full, Some(destination))
+            .expect("the whole image is readable");
+        assert!(
+            destination.path(4).exists(),
+            "control failed: nothing was written, so this test proves nothing"
+        );
+
+        // Cluster 4 ends exactly here, so it reads and cluster 5 does not.
+        let mut truncated = MemoryImage::new(CLUSTER2_BASE + 3 * CLUSTER_BYTES as u64);
+        let dir = scratch("read-failure");
+        let destination = Destination {
+            directory: &dir,
+            slot: 1,
+        };
+        let result = extract(&found, &boot, extent(), &mut truncated, Some(destination));
+
+        assert!(
+            matches!(result, Err(RecoveryError::Evidence(_))),
+            "expected an evidence read failure, got {result:?}"
+        );
+        assert!(
+            !destination.path(4).exists(),
+            "a partial file was left after the evidence failed"
+        );
+    }
+
+    /// ADR-0015 Decision G. A write that failed earlier left a file behind,
+    /// and a later evidence failure must remove it too.
+    #[test]
+    fn a_file_whose_write_had_failed_is_removed_when_the_evidence_then_fails() {
+        let dir = scratch("broken-then-read");
+        let path = dir.join("slot-1-cluster-4.bin");
+        fs::write(&path, b"truncated").expect("planting a partial file");
+
+        discard(
+            Sink::Broken("no space left".to_string()),
+            Some(path.as_path()),
+        );
+
+        assert!(!path.exists(), "the partial file survived");
+    }
+
+    /// A file of that name that this run did not create is not this run's
+    /// to remove, whichever way the run failed.
+    ///
+    /// ADR-0015 Decision C and `SAFETY.md` section 15.
+    #[test]
+    fn a_file_this_run_did_not_create_is_never_removed() {
+        let dir = scratch("not-ours");
+        let path = dir.join("slot-1-cluster-4.bin");
+        fs::write(&path, b"not this tool's").expect("planting a file");
+
+        discard(Sink::Taken, Some(path.as_path()));
+        discard(Sink::Unopened("denied".to_string()), Some(path.as_path()));
+        let output = settle(
+            Sink::Unopened("denied".to_string()),
+            Some(path.clone()),
+            &mut [0u8; CLUSTER_BYTES],
+        );
+
+        assert!(
+            matches!(output, Some(Output::NotCreated { .. })),
+            "expected NotCreated, got {output:?}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("reading the planted file"),
+            b"not this tool's"
+        );
+    }
+
+    /// A file that could not be created is reported as such, and not as a
+    /// failure that may have left something behind.
+    ///
+    /// A missing directory is used rather than permission bits, so the
+    /// result does not depend on whether the tests run as root.
+    #[test]
+    fn a_file_that_could_not_be_created_is_reported_not_created() {
+        let dir = scratch("uncreatable");
+        let path = dir.join("missing").join("slot-1-cluster-4.bin");
+
+        let sink = open_sink(Some(&path));
+        assert!(
+            matches!(sink, Sink::Unopened(_)),
+            "expected the open to fail"
+        );
+
+        let output = settle(sink, Some(path.clone()), &mut [0u8; CLUSTER_BYTES]);
+
+        assert!(
+            matches!(output, Some(Output::NotCreated { .. })),
+            "expected NotCreated, got {output:?}"
+        );
+        assert!(!path.exists());
+    }
+
+    /// ADR-0015 Decision G. A write failure removes what was written and
+    /// says whether the removal succeeded.
+    #[test]
+    fn a_write_failure_removes_the_partial_file_and_says_so() {
+        let dir = scratch("write-failure");
+        let path = dir.join("slot-1-cluster-4.bin");
+        fs::write(&path, b"truncated").expect("planting a partial file");
+
+        let output = settle(
+            Sink::Broken("no space left".to_string()),
+            Some(path.clone()),
+            &mut [0u8; CLUSTER_BYTES],
+        );
+
+        assert!(
+            matches!(output, Some(Output::Failed { removed: true, .. })),
+            "expected Failed with the file removed, got {output:?}"
+        );
+        assert!(!path.exists(), "the partial file survived");
+    }
 }
