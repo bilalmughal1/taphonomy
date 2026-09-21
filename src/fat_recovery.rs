@@ -1492,12 +1492,16 @@ mod tests {
         let path = dir.join("slot-1-cluster-4.bin");
         fs::write(&path, b"truncated").expect("planting a partial file");
 
-        discard(
+        let left = discard(
             Sink::Broken("no space left".to_string()),
             Some(path.as_path()),
         );
 
         assert!(!path.exists(), "the partial file survived");
+        assert!(
+            left.is_none(),
+            "a removal that succeeded was reported: {left:?}"
+        );
     }
 
     /// A file of that name that this run did not create is not this run's
@@ -1510,8 +1514,12 @@ mod tests {
         let path = dir.join("slot-1-cluster-4.bin");
         fs::write(&path, b"not this tool's").expect("planting a file");
 
-        discard(Sink::Taken, Some(path.as_path()));
-        discard(Sink::Unopened("denied".to_string()), Some(path.as_path()));
+        let taken = discard(Sink::Taken, Some(path.as_path()));
+        let unopened = discard(Sink::Unopened("denied".to_string()), Some(path.as_path()));
+        assert!(
+            taken.is_none() && unopened.is_none(),
+            "{taken:?} {unopened:?}"
+        );
         let output = settle(
             Sink::Unopened("denied".to_string()),
             Some(path.clone()),
@@ -1572,5 +1580,72 @@ mod tests {
             "expected Failed with the file removed, got {output:?}"
         );
         assert!(!path.exists(), "the partial file survived");
+    }
+
+    /// ADR-0015 section 9. A partial file the run could not remove is
+    /// reported, not assumed gone.
+    ///
+    /// Unix-specific because it relies on permission bits, as
+    /// `tests/read_only.rs` does. Removing a file needs the same write
+    /// permission on its directory as creating one, so the control proves
+    /// the directory refuses both; running as root would defeat it, and the
+    /// control makes that a failure rather than a vacuous pass.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_file_that_cannot_be_removed_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("unremovable");
+        let path = dir.join("slot-1-cluster-4.bin");
+        fs::write(&path, b"truncated").expect("planting a partial file");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))
+            .expect("making the destination read-only");
+
+        let accepted = fs::File::create(dir.join("probe")).is_ok();
+        let left = discard(
+            Sink::Broken("no space left".to_string()),
+            Some(path.as_path()),
+        );
+
+        // Restored before any assertion, so a failure cannot leave behind a
+        // directory the next run's scratch() is unable to remove.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
+            .expect("restoring the destination");
+
+        assert!(
+            !accepted,
+            "control failed: the directory accepted a new file, so this test proves nothing"
+        );
+        assert!(left.is_some(), "a failed removal was not reported");
+        assert!(path.exists(), "the file was removed after all");
+    }
+
+    /// Both failures reach the operator: the message carries the evidence
+    /// failure, the file left behind and why, and the source stays the
+    /// evidence failure, which is what voided the digest.
+    #[test]
+    fn a_partial_file_left_is_reported_beside_the_evidence_failure() {
+        let boot = boot();
+        let mut full = MemoryImage::new(IMAGE_BYTES);
+        let found = recoverable(&deleted_file(4, 30), &boot, &mut full);
+
+        let mut truncated = MemoryImage::new(CLUSTER2_BASE);
+        let cause = extract(&found, &boot, extent(), &mut truncated, None)
+            .expect_err("the evidence ends before cluster 4");
+        let cause_text = cause.to_string();
+
+        let error = RecoveryError::PartialLeft {
+            cause: Box::new(cause),
+            path: PathBuf::from("/destination/slot-1-cluster-4.bin"),
+            removal: "Permission denied".to_string(),
+        };
+
+        let text = error.to_string();
+        assert!(text.starts_with(&cause_text), "{text}");
+        assert!(text.contains("/destination/slot-1-cluster-4.bin"), "{text}");
+        assert!(text.contains("Permission denied"), "{text}");
+
+        let source = std::error::Error::source(&error).expect("a source");
+        assert_eq!(source.to_string(), cause_text);
     }
 }
