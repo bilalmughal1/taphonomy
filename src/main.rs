@@ -875,6 +875,14 @@ fn report_output(output: Option<&Output>, digest: Sha256Digest, counts: &mut Run
             println!("        {:<9} NOT WRITTEN: {} exists", "", path.display());
             counts.not_delivered += 1;
         }
+        Output::NotCreated { path, message } => {
+            println!(
+                "        {:<9} NOT WRITTEN: {} could not be created: {message}",
+                "",
+                path.display()
+            );
+            counts.not_delivered += 1;
+        }
         Output::Failed {
             path,
             message,

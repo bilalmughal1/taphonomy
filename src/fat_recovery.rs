@@ -393,9 +393,10 @@ pub fn assess<R: EvidenceReader>(
 
 /// Where an extracted artifact is to be written.
 ///
-/// The directory is the caller's, and ADR-0015 Decision B requires the
-/// caller to have established that it is not on the filesystem holding the
-/// evidence before the evidence was opened.
+/// The directory is the caller's, and ADR-0015 Decision B as its Appendix
+/// A.3 corrects it requires the caller to have established, before the
+/// evidence was opened, that the directory is not the one holding the
+/// evidence. Sharing a filesystem with an image file is permitted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Destination<'a> {
     /// Directory the artifact is created in.
@@ -442,12 +443,14 @@ pub enum Output {
         readback: Sha256Digest,
     },
 
-    /// Written, and the file could not be read back.
+    /// Written and flushed, and the file could not be read back.
     ///
-    /// The file is left in place. It may be sound, and removing a
-    /// possibly-recovered artifact because the destination could not be
-    /// re-read would destroy more than it protects. ADR-0015 section 10
-    /// does not cover this case and is owed an appendix recording it.
+    /// The file is left in place. Every write and the flush succeeded, so
+    /// it may be sound, and removing a possibly-recovered artifact because
+    /// the destination could not be re-read would destroy more than it
+    /// protects. A failed flush is not this case; it is [`Output::Failed`].
+    /// ADR-0015 section 10 does not cover this case and is owed an appendix
+    /// recording it.
     Unverified {
         /// Path written.
         path: PathBuf,
@@ -464,12 +467,27 @@ pub enum Output {
         path: PathBuf,
     },
 
-    /// Creating or writing failed.
+    /// The file could not be created, so nothing was written.
     ///
-    /// ADR-0015 Decision G: any partial file is removed, because a
+    /// Distinct from [`Output::Failed`] because nothing reached the
+    /// destination and nothing is left to remove. `CLAUDE.md` section 14
+    /// requires a permission failure to be told apart from an I/O failure,
+    /// and an unwritable directory is the ordinary cause of this one.
+    NotCreated {
+        /// Path that was attempted.
+        path: PathBuf,
+        /// Why it could not be created.
+        message: String,
+    },
+
+    /// The file was created, and a write or the flush failed.
+    ///
+    /// ADR-0015 Decision G: the partial file is removed, because a
     /// truncated file on disk cannot be told apart from a short file that
     /// was recovered whole, and `SAFETY.md` section 12 forbids a failure
-    /// becoming a silent partial success.
+    /// becoming a silent partial success. A failed flush counts: after a
+    /// writeback error the kernel may already have discarded the pages, so
+    /// the file cannot be taken to hold what was written.
     Failed {
         /// Path that was attempted.
         path: PathBuf,
@@ -527,7 +545,10 @@ enum Sink {
     Open(fs::File),
     /// The path was taken; nothing was opened.
     Taken,
-    /// Creating or writing failed, with the reason.
+    /// Creating the file failed, with the reason. Nothing is on disk.
+    Unopened(String),
+    /// The file was created and a write failed, with the reason. A partial
+    /// file is on disk and must be removed.
     Broken(String),
 }
 
@@ -613,7 +634,7 @@ fn open_sink(path: Option<&Path>) -> Sink {
     {
         Ok(file) => Sink::Open(file),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Sink::Taken,
-        Err(e) => Sink::Broken(e.to_string()),
+        Err(e) => Sink::Unopened(e.to_string()),
     }
 }
 
@@ -659,12 +680,28 @@ fn stream<R: EvidenceReader>(
 }
 
 /// Removes a partial file after the evidence failed.
+///
+/// Both sinks that created a file are removed. A write that failed before
+/// the read did leaves a truncated file just as surely as an open one, and
+/// ADR-0015 Decision G removes the file on any error after it is created.
+/// The removal is best effort because the read error is what the caller
+/// reports, and the evidence error voids the extraction either way.
 fn discard(sink: Sink, path: Option<&Path>) {
-    if let (Sink::Open(file), Some(path)) = (sink, path) {
-        // Closed before removal, so the file is not held open on platforms
-        // that care.
-        drop(file);
-        let _ = fs::remove_file(path);
+    let Some(path) = path else {
+        return;
+    };
+
+    match sink {
+        Sink::Open(file) => {
+            // Closed before removal, so the file is not held open on
+            // platforms that care.
+            drop(file);
+            let _ = fs::remove_file(path);
+        }
+        Sink::Broken(_) => {
+            let _ = fs::remove_file(path);
+        }
+        Sink::Absent | Sink::Taken | Sink::Unopened(_) => {}
     }
 }
 
@@ -675,6 +712,7 @@ fn settle(sink: Sink, path: Option<PathBuf>, buffer: &mut [u8]) -> Option<Output
     match sink {
         Sink::Absent => None,
         Sink::Taken => Some(Output::Exists { path }),
+        Sink::Unopened(message) => Some(Output::NotCreated { path, message }),
         Sink::Broken(message) => {
             let removed = fs::remove_file(&path).is_ok();
             Some(Output::Failed {
@@ -684,15 +722,21 @@ fn settle(sink: Sink, path: Option<PathBuf>, buffer: &mut [u8]) -> Option<Output
             })
         }
         Sink::Open(file) => {
-            // Closed before it is read back, so what is hashed is what the
-            // filesystem holds rather than what a buffer still owes it.
+            // Flushed before it is read back, because dropping a file
+            // ignores the errors closing it can report, and `sync_all` is
+            // where they surface. Closed before it is read back, so what is
+            // hashed is what the filesystem holds rather than what a buffer
+            // still owes it.
             let flushed = file.sync_all();
             drop(file);
 
+            // A failed flush is a failed write. ADR-0015 Decision G.
             if let Err(e) = flushed {
-                return Some(Output::Unverified {
+                let removed = fs::remove_file(&path).is_ok();
+                return Some(Output::Failed {
                     path,
                     message: e.to_string(),
+                    removed,
                 });
             }
 
