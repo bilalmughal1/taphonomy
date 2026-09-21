@@ -405,3 +405,147 @@ about why writing into the evidence is destructive: free space and
 unrecovered evidence are the same bytes, and a write changes the digest
 every finding is anchored to. What changed is only which check establishes
 that the destination is not the evidence.
+
+---
+
+## Appendix B: The output path's failures, measured and corrected (2026-09-22)
+
+Section 9 and section 10 were implemented at `b935901`. An audit at
+`a38a8cb` found three places where the code reported a destination failure
+as something it was not, one decision the code had made without this ADR,
+and one condition in section 13 that Appendix A left uncorrected. The body
+and Appendix A stand as written; this records what was found, what changed,
+and what remains.
+
+### B.1 Three misreported failures, corrected at `7c127a2`
+
+**An uncreatable file was reported as a partial file left behind.** One
+private state stood for both a file that could not be created and a file
+that was created and then failed. For the first, the run tried to remove a
+path it never created, the removal failed with not-found, and the entry was
+printed with ", partial file left". An unwritable `--output` directory
+produced that false statement for every entry. `CLAUDE.md` section 14
+requires a permission failure to be told apart from an I/O failure. The
+outcome is now `Output::NotCreated`, printed as "could not be created",
+counted under `artifacts not written`, and nothing is removed.
+
+**A write failure followed by a read failure left a truncated file.**
+`discard` removed the file only while it was still open. Where a write had
+already failed and the evidence then failed too, the partial file stayed on
+disk and the run returned the read error with no statement that a file
+existed. Section 9 removes the file on any error after it is created, and
+`SAFETY.md` section 12 forbids a failure becoming a silent partial success.
+`discard` now removes it in both states.
+
+**A failed flush was reported as a written file awaiting verification.**
+`settle` treated an error from `sync_all` as `Output::Unverified`, leaving
+the file in place and printing it as written. A failed flush is a failed
+write. After a writeback error Linux commonly discards the affected pages
+and marks them clean, so a later read may return something other than what
+was written; the kernel behaviour and the PostgreSQL failure it caused are
+recorded in LWN's "PostgreSQL's fsync() surprise" (April 2018) and on the
+PostgreSQL wiki page "Fsync Errors". The outcome is now `Output::Failed`,
+and the file is removed. `sync_all` itself stays: the Rust standard
+library's documentation for `std::fs::File` states that dropping a file
+ignores errors detected on closing and that `sync_all` is how to handle
+them.
+
+### B.2 `Output::Unverified`, which section 10 does not cover
+
+Section 10 covers a read-back that completes and differs. It does not cover
+a read-back that cannot be performed. Since `7c127a2` that case is narrowly
+defined: every write and the flush succeeded, and the file could not be
+re-opened or read. The file is left in place and printed as `NOT VERIFIED`
+with the reason. Removing it would destroy an artifact that may be sound on
+the strength of a failure that says nothing about the evidence. It is not
+counted under `artifacts not written`, because a file was delivered; it is
+reported as unverified rather than as matching.
+
+### B.3 What the read-back proves
+
+Section 10 says re-reading "proves what landed". That is stronger than the
+mechanism supports. The file is flushed, closed, re-opened and read through
+the ordinary file interface, and on Linux such a read is normally served
+from the page cache. What it proves is what the destination filesystem
+returns for that file after a successful flush. It detects a truncated or
+transformed file, a filesystem or FUSE layer that alters bytes, and any
+flush error the kernel reports. It does not establish what the storage
+medium holds. This project has not measured whether a given read-back was
+served from cache.
+
+Reading past the cache needs `O_DIRECT`, with its alignment rules, or
+`posix_fadvise` with `POSIX_FADV_DONTNEED`, which the Linux manual page
+describes as an attempt to free cached pages rather than a guarantee. Both
+need the `libc` crate or `unsafe` foreign calls. `CLAUDE.md` section 16
+requires `unsafe` to be justified, section 20 excludes a dependency for a
+capability of this size, and the crate's dependency count is zero. Neither
+is adopted. The stdout wording, "matches what was read", claims only what
+the read-back establishes.
+
+### B.4 Section 13, condition 2, as Appendix A corrects it
+
+Condition 2 still states the rule Appendix A withdrew: a destination on the
+evidence's own filesystem stopping the run. The condition that has been
+asserted since `16953a7` is Appendix A.3's: a destination that is the
+directory holding the evidence stops the run with exit status 2 before the
+evidence is opened.
+`tests/recovery_output.rs::a_destination_holding_the_evidence_is_refused`
+asserts it. Appendix A.4 should have said so.
+
+### B.5 Tests, measured at `3f14a7f`
+
+Five unit tests in `src/fat_recovery.rs` and one CLI test in
+`tests/recovery_output.rs` cover the failures above. The suite is 269 tests
+across thirteen `test result` lines, lib 155 and `recovery_output` 7.
+
+| Test | Asserts |
+| --- | --- |
+| `a_read_failure_part_way_through_leaves_no_partial_file` | Evidence fails at cluster 5 after cluster 4 is written; no file remains. A control run on the whole image writes the file. |
+| `a_file_whose_write_had_failed_is_removed_when_the_evidence_then_fails` | The second failure in B.1 |
+| `a_file_this_run_did_not_create_is_never_removed` | A file the run did not create survives every failure path, per section 5 |
+| `a_file_that_could_not_be_created_is_reported_not_created` | The first failure in B.1, using a missing directory so it holds under root |
+| `a_write_failure_removes_the_partial_file_and_says_so` | `Output::Failed` with the file removed |
+| `an_unwritable_destination_is_reported_without_a_partial_file` | The first failure in B.1 through the binary; the digest still stands. Unix only, with a control assertion as in `tests/read_only.rs` |
+
+**Untested:** a failed flush, and `Output::Unverified`. Neither can be
+reached without a failing device, and reaching them from a test would need
+a failure seam in production code that exists only for the test. Both are
+reasoned from the code, not measured.
+
+### B.6 Where the code does not yet meet section 9
+
+Section 9 states that if the removal also fails, both failures are reported
+and the run continues. On the read-failure path that is not so. `discard`
+removes the file on a best-effort basis and returns nothing, because the
+error `extract` returns is the evidence's. If the evidence fails and the
+removal fails too, a partial file remains and the run does not say so. It
+needs two failures at once, one of them in the evidence, and is not tested.
+Meeting section 9 here means carrying the removal's outcome alongside the
+read error, which is a change to `RecoveryError` and is left for its own
+commit.
+
+### B.7 A failed copy is not a partial recovery
+
+Section 9 removes a partial file, and `SAFETY.md` section 13 allows partial
+recovery where it is explicitly represented. They do not conflict, because
+the two concern different things. The file section 9 removes is an
+incomplete copy of bytes the run read in full: the evidence still holds
+every one of them and the digest of all of them is reported, so a run to a
+working destination reproduces the whole artifact. A partial recovery is
+one where the evidence cannot supply the whole file, because a cluster is
+unreadable, reused or elsewhere.
+
+That second kind has forensic value and the field keeps it: PhotoRec's
+documentation describes an option to keep corrupted files and fragments,
+named with a leading `b`. This tool does not produce it today. A refused
+run, a run voided by a read error, and a fragmented run all yield no
+partial artifact. Producing one would revisit `ADR-0010` Decision C's
+refusal and the single verdict `ADR-0014` Appendix A.11 records, alongside
+the per-cluster digests A.11 names, and needs its own ADR.
+
+### B.8 What this appendix does not change
+
+Decisions A to G stand, and Decision H stands with its claim read as B.3
+states it. Section 9's distinction between a read failure,
+which voids the digest, and a destination failure, which does not, is what
+the corrections in B.1 implement. Appendix A stands in full.
