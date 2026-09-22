@@ -1,14 +1,19 @@
-//! FAT directory entries and FAT32 root directory enumeration.
+//! FAT directory entries and FAT32 directory enumeration.
+//!
+//! The root and every live directory are read along their cluster chain.
+//! A deleted directory's chain is zeroed, so it is read from its first
+//! cluster alone, and only after that cluster identifies itself. ADR-0016.
 //!
 //! # What is shared and what is not
 //!
 //! The 32-byte directory entry structure parsed by [`classify`] is identical
 //! on FAT12, FAT16 and FAT32. That part of this module would serve all three.
 //!
-//! [`enumerate_root`] is FAT32-only. On FAT12 and FAT16 the root directory is
-//! a fixed-size region located immediately after the last FAT and sized by
-//! `BPB_RootEntCnt`; there is no cluster chain to walk. FAT32 sets that field
-//! to zero and stores the root directory as an ordinary cluster chain.
+//! [`enumerate_root`] and its siblings are FAT32-only. On FAT12 and FAT16
+//! the root directory is a fixed-size region located immediately after the
+//! last FAT and sized by `BPB_RootEntCnt`; there is no cluster chain to
+//! walk. FAT32 sets that field to zero and stores the root directory as an
+//! ordinary cluster chain.
 //!
 //! The module is named for FAT rather than for directories generally because
 //! chain walking is not shared beyond it.
@@ -402,9 +407,9 @@ impl From<Error> for DirectoryError {
     }
 }
 
-/// An enumerated root directory.
+/// An enumerated directory, the root or any other.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct RootDirectory {
+pub struct Directory {
     /// Entries in on-disk order, ending at the terminator.
     ///
     /// The terminator itself is not included. Long-name entries are, in the
@@ -433,7 +438,7 @@ pub struct RootDirectory {
     pub observations: Vec<DirectoryObservation>,
 }
 
-impl RootDirectory {
+impl Directory {
     /// Short entries: files and subdirectories, but not long-name
     /// components and not the volume label.
     ///
@@ -450,7 +455,7 @@ impl RootDirectory {
     /// Long-name components retained but not decoded.
     ///
     /// Counts allocated components only. A deleted one classifies as
-    /// [`EntryKind::Deleted`] and is counted by [`RootDirectory::deleted_count`].
+    /// [`EntryKind::Deleted`] and is counted by [`Directory::deleted_count`].
     pub fn long_name_count(&self) -> usize {
         self.entries
             .iter()
@@ -465,7 +470,7 @@ impl RootDirectory {
     /// this, a directory holding eight deleted entries and three live ones
     /// reports three and appears to have lost the rest.
     ///
-    /// Does not count [`RootDirectory::residue`], which is reported on its
+    /// Does not count [`Directory::residue`], which is reported on its
     /// own.
     pub fn deleted_count(&self) -> usize {
         self.entries
@@ -819,7 +824,188 @@ pub fn enumerate_root<R: EvidenceReader>(
     reader: &mut R,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
-) -> Result<RootDirectory, DirectoryError> {
+) -> Result<Directory, DirectoryError> {
+    enumerate(reader, boot, extent, boot.root_cluster, Chain::Follow).map(|(root, _)| root)
+}
+
+/// Enumerates a live directory below the root, from its first cluster.
+///
+/// ADR-0016 Decision A. A live directory's chain is intact, so it is read
+/// exactly as the root is, with the same bounds.
+pub fn enumerate_directory<R: EvidenceReader>(
+    reader: &mut R,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    first_cluster: u32,
+) -> Result<Directory, DirectoryError> {
+    enumerate(reader, boot, extent, first_cluster, Chain::Follow).map(|(dir, _)| dir)
+}
+
+/// Why a deleted directory's first cluster was not read.
+///
+/// ADR-0016 Decision C. Each is a finding about the evidence rather than a
+/// failure to read it, so it is reported as a coverage gap with its reason.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeletedDirectoryRefusal {
+    /// The FAT marks the cluster in use, so it belongs to something else
+    /// now. A cluster reused for a new directory passes the dot checks, and
+    /// only this one excludes it.
+    InUse {
+        /// The FAT entry found for the cluster.
+        fat_entry: u32,
+    },
+
+    /// Slot 0 is not a `.` entry naming this cluster.
+    NoSelfEntry,
+
+    /// Slot 1 is not a `..` entry.
+    NoParentEntry,
+}
+
+impl fmt::Display for DeletedDirectoryRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeletedDirectoryRefusal::InUse { fat_entry } => {
+                write!(f, "its first cluster is in use (FAT entry {fat_entry:#x})")
+            }
+            DeletedDirectoryRefusal::NoSelfEntry => {
+                f.write_str("slot 0 is not a . entry naming its first cluster")
+            }
+            DeletedDirectoryRefusal::NoParentEntry => f.write_str("slot 1 is not a .. entry"),
+        }
+    }
+}
+
+/// What reading a deleted directory's first cluster produced.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DeletedDirectory {
+    /// The first cluster passed every check and was read.
+    Read {
+        /// The entries of the first cluster, and nothing beyond it.
+        listing: Directory,
+
+        /// No terminator was found in the first cluster, so the listing may
+        /// have continued in a cluster the evidence does not locate.
+        /// ADR-0016 Decision D.
+        may_continue: bool,
+    },
+
+    /// The first cluster was not read.
+    Refused(DeletedDirectoryRefusal),
+}
+
+/// Reads a deleted directory's first cluster, and nothing else.
+///
+/// ADR-0016 Decisions A, C and D. The chain is zeroed, so no later cluster
+/// can be located, and the adjacent cluster is not read in its place:
+/// EXP-0005 finding 6 measured that it returns entries which look live and
+/// point beyond the volume. The first cluster is read only if the FAT marks
+/// it free and it carries `.` naming itself at slot 0 and `..` at slot 1,
+/// which EXP-0005 finding 2 measured.
+pub fn enumerate_deleted_directory<R: EvidenceReader>(
+    reader: &mut R,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    first_cluster: u32,
+) -> Result<DeletedDirectory, DirectoryError> {
+    // Checked before the FAT is consulted, so an out-of-range cluster never
+    // becomes an offset into the FAT.
+    let last_cluster = boot.geometry.cluster_count as u64 + FIRST_DATA_CLUSTER as u64;
+    if (first_cluster as u64) < FIRST_DATA_CLUSTER as u64 || first_cluster as u64 >= last_cluster {
+        return Err(DirectoryError::ClusterOutOfRange {
+            cluster: first_cluster,
+            cluster_count: boot.geometry.cluster_count,
+        });
+    }
+
+    let fat_index = boot.active_fat().unwrap_or(0);
+    let fat_entry = read_fat_entry(reader, boot, extent, fat_index, first_cluster)?;
+    if fat_entry != 0 {
+        return Ok(DeletedDirectory::Refused(DeletedDirectoryRefusal::InUse {
+            fat_entry,
+        }));
+    }
+
+    let (listing, terminated) =
+        enumerate(reader, boot, extent, first_cluster, Chain::FirstClusterOnly)?;
+
+    let mut slots = listing.entries.iter();
+    if !slots.next().is_some_and(|e| names_itself(e, first_cluster)) {
+        return Ok(DeletedDirectory::Refused(
+            DeletedDirectoryRefusal::NoSelfEntry,
+        ));
+    }
+    if !slots.next().is_some_and(names_parent) {
+        return Ok(DeletedDirectory::Refused(
+            DeletedDirectoryRefusal::NoParentEntry,
+        ));
+    }
+
+    Ok(DeletedDirectory::Read {
+        listing,
+        may_continue: !terminated,
+    })
+}
+
+/// Raw name of the `.` entry.
+const DOT_NAME: [u8; NAME_LEN] = *b".          ";
+
+/// Raw name of the `..` entry.
+const DOT_DOT_NAME: [u8; NAME_LEN] = *b"..         ";
+
+/// Whether an entry is a `.` or `..` entry.
+///
+/// ADR-0016 Decision B: they are listed and never followed. Recognised by
+/// raw name and the directory attribute, not by where they point: `..`
+/// holding 0 names the root, which EXP-0005 finding 3 measured and the FAT
+/// specification requires.
+pub fn is_dot_entry(kind: &EntryKind) -> bool {
+    matches!(
+        kind,
+        EntryKind::ShortName { raw_name, directory: true, .. }
+            if *raw_name == DOT_NAME || *raw_name == DOT_DOT_NAME
+    )
+}
+
+/// Whether an entry is slot 0's `.`, naming the cluster it sits in.
+fn names_itself(entry: &Entry, cluster: u32) -> bool {
+    entry.slot == 0
+        && matches!(
+            &entry.kind,
+            EntryKind::ShortName { raw_name, directory: true, first_cluster, .. }
+                if *raw_name == DOT_NAME && *first_cluster == cluster
+        )
+}
+
+/// Whether an entry is slot 1's `..`.
+fn names_parent(entry: &Entry) -> bool {
+    entry.slot == 1
+        && matches!(
+            &entry.kind,
+            EntryKind::ShortName { raw_name, directory: true, .. } if *raw_name == DOT_DOT_NAME
+        )
+}
+
+/// Whether a walk follows the FAT after each cluster.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Chain {
+    /// A live directory: follow the chain to its end.
+    Follow,
+
+    /// A deleted directory: its chain is zeroed, so stop after the first.
+    FirstClusterOnly,
+}
+
+/// Enumerates a directory from its first cluster.
+///
+/// Returns the listing and whether a terminator was found.
+fn enumerate<R: EvidenceReader>(
+    reader: &mut R,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    first_cluster: u32,
+    chain: Chain,
+) -> Result<(Directory, bool), DirectoryError> {
     let cluster_bytes = boot.geometry.cluster_bytes() as usize;
     let slots_per_cluster = cluster_bytes / ENTRY_BYTES;
 
@@ -837,7 +1023,7 @@ pub fn enumerate_root<R: EvidenceReader>(
     let mut clusters: Vec<u32> = Vec::new();
     let mut observations: Vec<DirectoryObservation> = Vec::new();
 
-    let mut cluster = boot.root_cluster;
+    let mut cluster = first_cluster;
     let mut terminated = false;
 
     loop {
@@ -939,6 +1125,10 @@ pub fn enumerate_root<R: EvidenceReader>(
             });
         }
 
+        if chain == Chain::FirstClusterOnly {
+            break;
+        }
+
         let next = read_fat_entry(reader, boot, extent, fat_index, cluster)?;
 
         if next >= FAT_END_OF_CHAIN {
@@ -957,12 +1147,15 @@ pub fn enumerate_root<R: EvidenceReader>(
         cluster = next;
     }
 
-    Ok(RootDirectory {
-        entries,
-        residue,
-        clusters,
-        observations,
-    })
+    Ok((
+        Directory {
+            entries,
+            residue,
+            clusters,
+            observations,
+        },
+        terminated,
+    ))
 }
 
 /// Reads one FAT entry, masked to its 28 significant bits.
