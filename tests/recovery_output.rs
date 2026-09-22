@@ -105,7 +105,7 @@ fn a_written_artifact_carries_the_digest_the_run_reported() {
 
     let big = written
         .iter()
-        .find(|path| path.ends_with("slot-1-cluster-3.bin"))
+        .find(|path| path.ends_with("c2-s1-first-3.bin"))
         .expect("BIG.TXT's artifact");
 
     assert_eq!(digest_of_file(big).to_string(), BIG_DIGEST_HEX);
@@ -142,7 +142,7 @@ fn a_destination_holding_the_evidence_is_refused() {
 #[test]
 fn an_existing_artifact_is_preserved_and_the_run_continues() {
     let dir = scratch("exists");
-    let taken = dir.join("slot-1-cluster-3.bin");
+    let taken = dir.join("c2-s1-first-3.bin");
     fs::write(&taken, b"not this tool's").expect("planting a file");
 
     let output = run(&[
@@ -166,7 +166,7 @@ fn an_existing_artifact_is_preserved_and_the_run_continues() {
 
     // The run carried on: the second entry was written, and both digests
     // were still reported.
-    assert!(dir.join("slot-4-cluster-9.bin").exists(), "{text}");
+    assert!(dir.join("c2-s4-first-9.bin").exists(), "{text}");
     assert!(text.contains(BIG_DIGEST_HEX), "{text}");
 }
 
@@ -186,10 +186,10 @@ fn a_written_artifact_holds_the_declared_size_without_slack() {
 
     assert!(output.status.success(), "{}", stderr(&output));
 
-    let big = fs::metadata(dir.join("slot-1-cluster-3.bin")).expect("the artifact");
+    let big = fs::metadata(dir.join("c2-s1-first-3.bin")).expect("the artifact");
     assert_eq!(big.len(), 1_600, "slack would make this 2048");
 
-    let small = fs::metadata(dir.join("slot-4-cluster-9.bin")).expect("the artifact");
+    let small = fs::metadata(dir.join("c2-s4-first-9.bin")).expect("the artifact");
     assert_eq!(small.len(), 29, "slack would make this 512");
 }
 
@@ -216,7 +216,7 @@ fn a_refused_entry_writes_no_artifact() {
 
     for path in written_files(&dir) {
         assert!(
-            !path.ends_with("slot-2-cluster-4.bin"),
+            !path.ends_with("c2-s2-first-4.bin"),
             "the refused entry produced a file: {}",
             path.display()
         );
@@ -244,7 +244,7 @@ fn a_fragmented_file_is_written_whole_and_is_not_the_file() {
 
     assert!(output.status.success(), "{}", stderr(&output));
 
-    let artifact = dir.join("slot-2-cluster-4.bin");
+    let artifact = dir.join("c2-s2-first-4.bin");
     assert!(artifact.exists(), "{}", stdout(&output));
 
     let written = digest_of_file(&artifact);

@@ -790,6 +790,7 @@ fn report_recovery(
                     // reaches the path.
                     let destination = options.output.map(|directory| Destination {
                         directory,
+                        cluster: entry.cluster,
                         slot: entry.slot,
                     });
 
