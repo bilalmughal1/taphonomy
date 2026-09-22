@@ -232,13 +232,15 @@ fn an_image_declaring_no_partition_is_covered_completely_and_exits_zero() {
     );
 }
 
-/// `ADR-0014` Appendix B.10. Incomplete coverage exits zero. While
-/// subdirectories are not read this is the ordinary state of any volume
-/// holding one, so a non-zero code here would fire on almost every run and
-/// be learned as noise. The gap is reported on stdout instead.
+/// `ADR-0014` Appendix B.10. Incomplete coverage exits zero: the gap is
+/// reported on stdout rather than as an error, because the run did analyse
+/// what it reports. `fat32-deleted-split-directory.img` is incomplete
+/// through `ADR-0016` Decision D alone: `BIG`'s first cluster is read and
+/// holds no terminator, so its listing may continue where the evidence does
+/// not say.
 #[test]
-fn a_directory_that_was_not_read_leaves_coverage_incomplete_and_exits_zero() {
-    let output = run(&[recovery_fixture()]);
+fn a_listing_that_may_continue_leaves_coverage_incomplete_and_exits_zero() {
+    let output = run(&[&fixture("fat32-deleted-split-directory.img")]);
 
     assert_eq!(output.status.code(), Some(0));
 
@@ -247,5 +249,6 @@ fn a_directory_that_was_not_read_leaves_coverage_incomplete_and_exits_zero() {
         stdout.contains("coverage     incomplete"),
         "expected incomplete coverage, instead got: {stdout}"
     );
-    assert!(stdout.contains("directories not read"));
+    assert!(stdout.contains("listings that may continue 1"), "{stdout}");
+    assert!(!stdout.contains("directories not read"), "{stdout}");
 }

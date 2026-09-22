@@ -9,6 +9,7 @@
 //! rather than in the library: a count of what was covered is reporting
 //! rather than recovery, and no consumer other than this binary exists.
 
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,8 @@ use taphonomy::EvidenceFile;
 use taphonomy::Sha256Digest;
 use taphonomy::confidence::Confidence;
 use taphonomy::fat_directory::{
-    DeletedKind, Entry, EntryKind, FirstByte, associate, enumerate_root, recovered_name,
+    DeletedDirectory, DeletedKind, Directory, Entry, EntryKind, FirstByte, associate,
+    enumerate_deleted_directory, enumerate_directory, enumerate_root, is_dot_entry, recovered_name,
 };
 use taphonomy::fat_recovery::{Assessment, Destination, Ineligible, Output, assess, extract};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
@@ -465,55 +467,229 @@ fn report_root_directory(
 
     counts.volumes_analysed += 1;
 
-    let chain: Vec<String> = root.clusters.iter().map(|c| c.to_string()).collect();
+    // `ADR-0016` Decision E. Every cluster read as a directory, for the
+    // whole volume, so no directory is read twice and the walk terminates.
+    let mut seen: HashSet<u32> = root.clusters.iter().copied().collect();
+    let mut pending: VecDeque<Pending> = VecDeque::new();
 
-    println!("    root directory");
-    println!("      cluster chain      {}", chain.join(" -> "));
-    println!("      entries            {}", root.entries.len());
-    println!("      short entries      {}", root.short_entry_count());
-    println!("      long name entries  {}", root.long_name_count());
-    println!("      deleted entries    {}", root.deleted_count());
-
-    for (index, entry) in root.entries.iter().enumerate() {
-        print_entry(entry, &root.entries, index);
-    }
-
-    if !root.residue.is_empty() {
-        println!("      past the terminator");
-        for (index, entry) in root.residue.iter().enumerate() {
-            print_entry(entry, &root.residue, index);
-        }
-    }
-
-    if !root.observations.is_empty() {
-        println!("      directory observations");
-        for o in &root.observations {
-            println!("        {o}");
-        }
-    }
-
-    // Every directory this run listed and did not read. `ADR-0014` Appendix
-    // B.2: what a listed directory holds was not analysed, and from the
-    // evidence the tool cannot know whether anything was there, so it is
-    // counted whether it is live or deleted and whatever it holds.
-    let listed = root.entries.iter().chain(root.residue.iter());
-    counts.directories_unread += listed.filter(|entry| is_directory(&entry.kind)).count();
-
+    print_directory("root directory", &root);
+    queue_subdirectories(&root, "", 0, &mut pending);
     report_recovery(evidence, boot, extent, &root.entries, options, counts);
     report_recovery(evidence, boot, extent, &root.residue, options, counts);
+
+    while let Some(next) = pending.pop_front() {
+        report_subdirectory(
+            evidence,
+            boot,
+            extent,
+            next,
+            &mut seen,
+            &mut pending,
+            options,
+            counts,
+        );
+    }
 }
 
-/// Whether an entry describes a directory, live or deleted.
+/// Deepest level below the root at which a directory is read.
 ///
-/// A deleted directory is counted here and not among the ineligible
-/// assessments, so that one entry is one gap rather than two findings.
-fn is_directory(kind: &EntryKind) -> bool {
-    match kind {
-        EntryKind::ShortName { directory, .. } => *directory,
-        EntryKind::Deleted {
-            was: DeletedKind::ShortName { directory, .. },
-        } => *directory,
-        _ => false,
+/// `ADR-0016` Decision E. Termination is guaranteed by reading no cluster
+/// twice; this bounds output, which a chain of nested directories each
+/// reported under its full path would otherwise grow quadratically. The
+/// Sleuth Kit's directory walk uses the same number. A DCF card nests two.
+const MAX_DEPTH: usize = 128;
+
+/// A directory named by an entry and not yet read.
+struct Pending {
+    /// First cluster, from the entry that names it.
+    first_cluster: u32,
+
+    /// Path of recovered names from the root, for the report only.
+    path: String,
+
+    /// Levels below the root.
+    depth: usize,
+
+    /// Whether the entry naming it is deleted.
+    deleted: bool,
+}
+
+/// Queues every directory a listing names, except `.` and `..`.
+///
+/// `ADR-0016` Decision B: the dot entries are listed and never followed.
+/// Entries past the terminator are followed as well, because a deleted
+/// directory named there is read under the same checks as one named before
+/// it, and `ADR-0014` Appendix B.2 counted both.
+fn queue_subdirectories(
+    directory: &Directory,
+    parent: &str,
+    depth: usize,
+    pending: &mut VecDeque<Pending>,
+) {
+    for entry in directory.entries.iter().chain(directory.residue.iter()) {
+        if is_dot_entry(&entry.kind) {
+            continue;
+        }
+
+        let (first_cluster, segment, deleted) = match &entry.kind {
+            EntryKind::ShortName {
+                name,
+                directory: true,
+                first_cluster,
+                ..
+            } => (*first_cluster, name.clone(), false),
+            EntryKind::Deleted {
+                was:
+                    DeletedKind::ShortName {
+                        surviving_name,
+                        directory: true,
+                        first_cluster,
+                        ..
+                    },
+            } => (*first_cluster, recovered_name(b'?', surviving_name), true),
+            _ => continue,
+        };
+
+        // `ADR-0016` Decision G. A name that cannot be rendered is not
+        // guessed at; the directory is named by its first cluster instead.
+        let segment = segment.unwrap_or_else(|| format!("c{first_cluster}"));
+
+        pending.push_back(Pending {
+            first_cluster,
+            path: format!("{parent}/{segment}"),
+            depth: depth + 1,
+            deleted,
+        });
+    }
+}
+
+/// Reads one directory below the root, reports it, and queues what it names.
+///
+/// `ADR-0016` Decisions A, C, D and E. A directory that is not read is a
+/// coverage gap with its reason printed, and one that was read but may
+/// continue is a gap of its own kind.
+#[allow(clippy::too_many_arguments)]
+fn report_subdirectory(
+    evidence: &mut EvidenceFile,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    next: Pending,
+    seen: &mut HashSet<u32>,
+    pending: &mut VecDeque<Pending>,
+    options: Options<'_>,
+    counts: &mut RunCounts,
+) {
+    let kind = if next.deleted {
+        "deleted directory"
+    } else {
+        "directory"
+    };
+    let heading = format!("{kind} {}", next.path);
+
+    if next.depth > MAX_DEPTH {
+        println!("    {heading}");
+        println!("      NOT READ: deeper than {MAX_DEPTH} levels below the root");
+        counts.directories_unread += 1;
+        return;
+    }
+    if seen.contains(&next.first_cluster) {
+        println!("    {heading}");
+        println!(
+            "      NOT READ: cluster {} was already read as a directory",
+            next.first_cluster
+        );
+        counts.directories_unread += 1;
+        return;
+    }
+
+    let (directory, may_continue) = if next.deleted {
+        match enumerate_deleted_directory(evidence, boot, extent, next.first_cluster) {
+            Ok(DeletedDirectory::Read {
+                listing,
+                may_continue,
+            }) => (listing, may_continue),
+            Ok(DeletedDirectory::Refused(reason)) => {
+                println!("    {heading}");
+                println!("      NOT READ: {reason}");
+                counts.directories_unread += 1;
+                return;
+            }
+            Err(e) => {
+                println!("    {heading}");
+                println!("      NOT READ: {e}");
+                counts.directories_unread += 1;
+                return;
+            }
+        }
+    } else {
+        match enumerate_directory(evidence, boot, extent, next.first_cluster) {
+            Ok(listing) => (listing, false),
+            Err(e) => {
+                println!("    {heading}");
+                println!("      NOT READ: {e}");
+                counts.directories_unread += 1;
+                return;
+            }
+        }
+    };
+
+    // A live chain that runs into a cluster another directory already
+    // occupies is cross-linked, and its listing would repeat that one.
+    if let Some(shared) = directory.clusters.iter().find(|c| seen.contains(*c)) {
+        println!("    {heading}");
+        println!("      NOT READ: cluster {shared} was already read as a directory");
+        counts.directories_unread += 1;
+        return;
+    }
+    seen.extend(directory.clusters.iter().copied());
+
+    print_directory(&heading, &directory);
+
+    if may_continue {
+        // `ADR-0016` Decision D. The first cluster holds no terminator, and
+        // no later cluster can be located, so nothing else is read.
+        println!(
+            "      listing may continue: cluster {} holds no terminator",
+            next.first_cluster
+        );
+        counts.listings_may_continue += 1;
+    }
+
+    queue_subdirectories(&directory, &next.path, next.depth, pending);
+    report_recovery(evidence, boot, extent, &directory.entries, options, counts);
+    report_recovery(evidence, boot, extent, &directory.residue, options, counts);
+}
+
+/// Prints a directory's statistics, entries, residue and observations.
+///
+/// The root's block is printed exactly as it was before subdirectories were
+/// read, so every heading below the root reuses it unchanged.
+fn print_directory(heading: &str, directory: &Directory) {
+    let chain: Vec<String> = directory.clusters.iter().map(|c| c.to_string()).collect();
+
+    println!("    {heading}");
+    println!("      cluster chain      {}", chain.join(" -> "));
+    println!("      entries            {}", directory.entries.len());
+    println!("      short entries      {}", directory.short_entry_count());
+    println!("      long name entries  {}", directory.long_name_count());
+    println!("      deleted entries    {}", directory.deleted_count());
+
+    for (index, entry) in directory.entries.iter().enumerate() {
+        print_entry(entry, &directory.entries, index);
+    }
+
+    if !directory.residue.is_empty() {
+        println!("      past the terminator");
+        for (index, entry) in directory.residue.iter().enumerate() {
+            print_entry(entry, &directory.residue, index);
+        }
+    }
+
+    if !directory.observations.is_empty() {
+        println!("      directory observations");
+        for o in &directory.observations {
+            println!("        {o}");
+        }
     }
 }
 
@@ -558,8 +734,17 @@ struct RunCounts {
     /// A FAT32 volume whose root directory could not be enumerated.
     root_unread: usize,
 
-    /// A directory that was listed and whose contents were not read.
+    /// A directory that was named and whose contents were not read.
+    ///
+    /// `ADR-0016` narrows it to a deleted directory whose first cluster did
+    /// not identify itself, a live chain that could not be walked, and a
+    /// directory beyond the depth bound or already read.
     directories_unread: usize,
+
+    /// A deleted directory whose first cluster was read and holds no
+    /// terminator, so its listing may continue where the evidence does not
+    /// say. `ADR-0016` Decision D.
+    listings_may_continue: usize,
 
     /// A deleted entry whose assessment failed.
     not_assessed: usize,
@@ -597,8 +782,9 @@ struct RunCounts {
 impl RunCounts {
     /// Everything the run did not analyse, counted once per occurrence.
     ///
-    /// The eleven kinds `ADR-0014` Appendix B.4 enumerates, and the
-    /// twelfth `ADR-0015` section 9 adds. Three of them no fixture reaches
+    /// The eleven kinds `ADR-0014` Appendix B.4 enumerates, the twelfth
+    /// `ADR-0015` section 9 adds, and the thirteenth `ADR-0016` Decision D
+    /// adds. Three of them no fixture reaches
     /// and one no fixture can, which is why the derivation below is unit
     /// tested rather than measured alone.
     const fn gaps(&self) -> usize {
@@ -614,6 +800,7 @@ impl RunCounts {
             + self.not_extracted
             + self.not_delivered
             + self.directories_unread
+            + self.listings_may_continue
     }
 
     /// How much of the evidence the run covered.
@@ -747,8 +934,10 @@ fn report_recovery(
                     Ineligible::EmptyFile => counts.empty += 1,
                     Ineligible::ReservedFirstCluster { .. } => counts.reserved_cluster += 1,
                     Ineligible::RunOutOfRange { .. } => counts.run_out_of_range += 1,
-                    // A deleted directory is a coverage gap, counted where
-                    // the directory was listed. The rest describe no file:
+                    // A deleted directory is read as a directory, and any
+                    // gap it leaves is counted where it is read, so that one
+                    // entry is never two findings. `ADR-0016` Decisions C and
+                    // D. The rest describe no file:
                     // a long-name component, a volume label and an entry
                     // with impossible attributes locate no content, so
                     // counting them as files that went unrecovered would
@@ -938,6 +1127,7 @@ fn print_summary(counts: &RunCounts, options: Options<'_>) {
     print_gap("entries not extracted", counts.not_extracted);
     print_gap("artifacts not written", counts.not_delivered);
     print_gap("directories not read", counts.directories_unread);
+    print_gap("listings that may continue", counts.listings_may_continue);
 
     // Only `--recover` produces an artifact, so without it the line would
     // report a zero that the invocation already determined.
@@ -1238,8 +1428,9 @@ mod tests {
     }
 
     #[test]
-    fn a_listed_directory_leaves_a_volume_incompletely_covered() {
-        // `fat32-recover-run.img`, whose root holds a deleted `/gone`.
+    fn a_directory_not_read_leaves_a_volume_incompletely_covered() {
+        // A deleted directory whose first cluster failed `ADR-0016`
+        // Decision C's checks. No fixture holds one.
         let counts = RunCounts {
             volumes_analysed: 1,
             directories_unread: 1,
@@ -1264,10 +1455,11 @@ mod tests {
 
     #[test]
     fn every_kind_of_gap_is_counted_as_one() {
-        // The eleven kinds of Appendix B.4 and the twelfth `ADR-0015`
-        // section 9 adds. Four are unreachable from any fixture, so this is
-        // the only place they are exercised.
-        let kinds: [fn(&mut RunCounts); 12] = [
+        // The eleven kinds of Appendix B.4, the twelfth `ADR-0015` section 9
+        // adds and the thirteenth `ADR-0016` Decision D adds. Four are
+        // unreachable from any fixture, so this is the only place they are
+        // exercised.
+        let kinds: [fn(&mut RunCounts); 13] = [
             |counts| counts.table_unread += 1,
             |counts| counts.table_rejected += 1,
             |counts| counts.gpt += 1,
@@ -1280,6 +1472,7 @@ mod tests {
             |counts| counts.not_extracted += 1,
             |counts| counts.not_delivered += 1,
             |counts| counts.directories_unread += 1,
+            |counts| counts.listings_may_continue += 1,
         ];
 
         for set in kinds {

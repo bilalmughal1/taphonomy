@@ -111,22 +111,26 @@ fn an_unreadable_first_sector_is_reported_without_a_fixture() {
     assert!(stdout(&output).contains(&digest), "reported: {digest}");
 }
 
-/// `ADR-0014` Appendix B.2. A live directory is a gap for the same reason a
-/// deleted one is: its contents were not analysed, and from the evidence the
-/// tool cannot know whether anything was there. `fat32-root-entries.img`
-/// holds `/logs`, which is empty, and the run must not imply that it knows.
+/// `ADR-0016` Decision A. A live directory is entered, and once its
+/// contents are read it is no gap. `fat32-root-entries.img` holds `/logs`,
+/// which is empty; before subdirectories were read this run reported it as
+/// the volume's one gap.
 #[test]
-fn a_live_directory_that_was_not_entered_is_a_gap() {
+fn a_live_directory_is_entered_and_leaves_no_gap() {
     let output = run(&[&fixture("fat32-root-entries.img")]);
 
     assert_eq!(output.status.code(), Some(0));
+    assert!(stdout(&output).contains("\n    directory /"));
 
     let summary = summary(&output);
     assert!(
-        summary.contains("coverage     incomplete"),
+        summary.contains("coverage     complete"),
         "reported: {summary}"
     );
-    assert!(summary.contains("directories not read       1"));
+    assert!(
+        !summary.contains("directories not read"),
+        "reported: {summary}"
+    );
 }
 
 /// `ADR-0013` Appendix C.4. An operator asking whether a file is present
