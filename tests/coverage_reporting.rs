@@ -271,3 +271,63 @@ fn a_deleted_directory_is_read_no_further_than_its_first_cluster() {
         "reported: {summary}"
     );
 }
+
+/// `ADR-0016` Decision E and section 11 condition 6. A directory whose
+/// cluster was already read is not read again.
+///
+/// In `fat32-directory-loop.img`, `/A/B`'s entry names `/A`'s own first
+/// cluster. Without the record of clusters read, the walk would re-enter
+/// `/A` for ever; with it, the second arrival is a gap and `/A` is listed
+/// exactly once.
+#[test]
+fn a_directory_reached_twice_is_not_read_again() {
+    let output = run(&[&fixture("fat32-directory-loop.img")]);
+
+    assert_eq!(output.status.code(), Some(0));
+
+    let text = stdout(&output);
+    assert!(text.contains("directory /A/B"), "{text}");
+    assert!(
+        text.contains("NOT READ: cluster 3 was already read as a directory"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("cluster chain      3").count(),
+        1,
+        "cluster 3 was listed more than once: {text}"
+    );
+
+    let summary = summary(&output);
+    assert!(
+        summary.contains("directories not read       1"),
+        "reported: {summary}"
+    );
+}
+
+/// `ADR-0016` Decision E and section 11 condition 6. A directory deeper
+/// than 128 levels below the root is not read.
+///
+/// `fat32-nested-directories.img` nests 130. The 128th, at cluster 130, is
+/// read; the 129th is refused. The 130th is named only inside the cluster
+/// that was refused, so it is never reached and the bound leaves one gap
+/// rather than one for every level beneath it.
+#[test]
+fn a_directory_below_the_depth_bound_is_not_read() {
+    let output = run(&[&fixture("fat32-nested-directories.img")]);
+
+    assert_eq!(output.status.code(), Some(0));
+
+    let text = stdout(&output);
+    assert!(text.contains("cluster chain      130"), "{text}");
+    assert!(
+        text.contains("NOT READ: deeper than 128 levels below the root"),
+        "{text}"
+    );
+    assert!(!text.contains("cluster chain      131"), "{text}");
+
+    let summary = summary(&output);
+    assert!(
+        summary.contains("directories not read       1"),
+        "reported: {summary}"
+    );
+}

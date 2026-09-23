@@ -23,6 +23,11 @@ const ALPHA_DIGEST_HEX: &str = "7144bb30418262f6995f3ad55b7e3147213c088fd9c65a16
 const BETA_DIGEST_HEX: &str = "aa58025d4c86a81175aa87ef17f1806b29a021e7483cac0b9654a6f95fa9f2c5";
 const GAMMA_DIGEST_HEX: &str = "87ff853631aedb5277ccab38be53e6e8418e14d3902718a30e552964a8699ac4";
 
+/// The content both deleted entries of `fat32-slot-collision.img` name:
+/// cluster 5, which still holds `X.TXT`'s content.
+const COLLISION_DIGEST_HEX: &str =
+    "9c9d337b37bdea6963d8c43e1869bc9e7983d3a98f52d804e220b45057709b7d";
+
 /// `BIG.TXT`'s content digest, as `ADR-0013` section 16.1 records it.
 const BIG_DIGEST_HEX: &str = "5ecddc870bcf7d8525574328f548af954ac1ab8d1d56555b40d01d2977a21a91";
 
@@ -356,4 +361,37 @@ fn the_files_inside_a_deleted_subtree_are_recovered() {
     assert!(!text.contains("/?ONE/."), "{text}");
     assert!(!text.contains("NOT READ"), "{text}");
     assert!(text.contains("coverage     complete"), "{text}");
+}
+
+/// `ADR-0016` Decision F and section 11 condition 7. Two entries at the
+/// same slot of different directories, naming the same first cluster, are
+/// written as two files.
+///
+/// In `fat32-slot-collision.img` both are slot 2, one in cluster 3 and one
+/// in cluster 4, and both name cluster 5. Under `ADR-0015` Decision D both
+/// were `slot-2-cluster-5.bin`, so the second was reported as a file that
+/// already existed. The entry's own cluster in the name is what separates
+/// them, and both hold the same content because both name the same run.
+#[test]
+fn two_entries_at_the_same_slot_of_different_directories_are_two_files() {
+    let dir = scratch("collision");
+    let output = run(&[
+        &fixture("fat32-slot-collision.img"),
+        "--recover",
+        "--output",
+        dir.to_str().expect("a utf-8 scratch path"),
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let text = stdout(&output);
+    assert!(!text.contains("exists"), "{text}");
+
+    let written = written_files(&dir);
+    assert_eq!(written.len(), 2, "wrote {written:?}");
+    for name in ["c3-s2-first-5.bin", "c4-s2-first-5.bin"] {
+        let path = dir.join(name);
+        assert!(path.exists(), "{name} missing from {written:?}");
+        assert_eq!(digest_of_file(&path).to_string(), COLLISION_DIGEST_HEX);
+    }
 }
