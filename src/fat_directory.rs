@@ -2005,4 +2005,173 @@ mod tests {
             Err(DirectoryError::Evidence(_))
         ));
     }
+
+    // Directories below the root. ADR-0016.
+
+    /// A directory entry naming `cluster` as its first.
+    fn directory_entry(name: &[u8; NAME_LEN], cluster: u32) -> [u8; ENTRY_BYTES] {
+        let mut e = entry(name, ATTR_DIRECTORY);
+        e[OFF_FST_CLUS_HI..OFF_FST_CLUS_HI + 2]
+            .copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+        e[OFF_FST_CLUS_LO..OFF_FST_CLUS_LO + 2].copy_from_slice(&(cluster as u16).to_le_bytes());
+        e
+    }
+
+    /// The `.` and `..` a directory at `cluster` under the root carries.
+    fn dots(cluster: u32) -> [[u8; ENTRY_BYTES]; 2] {
+        [
+            directory_entry(&DOT_NAME, cluster),
+            directory_entry(&DOT_DOT_NAME, 0),
+        ]
+    }
+
+    /// The positive control for every refusal below: a free first cluster
+    /// with both dot entries is read, and its terminator is found.
+    #[test]
+    fn a_deleted_directory_that_identifies_itself_is_read() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        let [dot, dot_dot] = dots(10);
+        image.write_cluster(10, &[dot, dot_dot, numbered(1)]);
+
+        let read = enumerate_deleted_directory(&mut image, &boot, extent(), 10).expect("reading");
+
+        match read {
+            DeletedDirectory::Read {
+                listing,
+                may_continue,
+            } => {
+                assert_eq!(listing.clusters, vec![10]);
+                assert_eq!(listing.entries.len(), 3);
+                assert!(!may_continue, "a terminator was written at slot 3");
+            }
+            other => panic!("expected the directory to be read, got {other:?}"),
+        }
+    }
+
+    /// ADR-0016 Decision C. A cluster the FAT marks in use belongs to
+    /// something else now, even when its dot entries look right.
+    #[test]
+    fn a_deleted_directory_whose_first_cluster_is_in_use_is_refused() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        let [dot, dot_dot] = dots(10);
+        image.write_cluster(10, &[dot, dot_dot]);
+        image.write_fat(FAT0_BASE, 10, 0x0FFF_FFF8);
+
+        assert_eq!(
+            enumerate_deleted_directory(&mut image, &boot, extent(), 10).expect("reading"),
+            DeletedDirectory::Refused(DeletedDirectoryRefusal::InUse {
+                fat_entry: 0x0FFF_FFF8
+            })
+        );
+    }
+
+    /// ADR-0016 Decision C. Slot 0 must be `.` naming this cluster: one
+    /// naming another cluster, and file data, are both refused.
+    #[test]
+    fn a_deleted_directory_without_its_own_dot_entry_is_refused() {
+        let boot = boot(0);
+
+        let [_, dot_dot] = dots(10);
+        let elsewhere = directory_entry(&DOT_NAME, 11);
+        for first in [elsewhere, numbered(1)] {
+            let mut image = MemoryImage::new(IMAGE_BYTES);
+            image.write_cluster(10, &[first, dot_dot]);
+
+            assert_eq!(
+                enumerate_deleted_directory(&mut image, &boot, extent(), 10).expect("reading"),
+                DeletedDirectory::Refused(DeletedDirectoryRefusal::NoSelfEntry)
+            );
+        }
+    }
+
+    /// ADR-0016 Decision C. Slot 1 must be `..`.
+    #[test]
+    fn a_deleted_directory_without_a_dot_dot_entry_is_refused() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        let [dot, _] = dots(10);
+        image.write_cluster(10, &[dot, numbered(1)]);
+
+        assert_eq!(
+            enumerate_deleted_directory(&mut image, &boot, extent(), 10).expect("reading"),
+            DeletedDirectory::Refused(DeletedDirectoryRefusal::NoParentEntry)
+        );
+    }
+
+    /// ADR-0016 Decisions A and D, and EXP-0005 finding 6. A full first
+    /// cluster may continue, and the cluster after it is never read in its
+    /// place, even when it holds entries that look live.
+    #[test]
+    fn a_full_first_cluster_may_continue_and_nothing_beyond_it_is_read() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        let [dot, dot_dot] = dots(10);
+        let mut first = vec![dot, dot_dot];
+        first.extend((1..=14).map(numbered));
+        image.write_cluster(10, &first);
+        image.write_cluster(11, &[numbered(20), numbered(21)]);
+
+        match enumerate_deleted_directory(&mut image, &boot, extent(), 10).expect("reading") {
+            DeletedDirectory::Read {
+                listing,
+                may_continue,
+            } => {
+                assert!(may_continue, "sixteen slots and no terminator");
+                assert_eq!(listing.clusters, vec![10]);
+                assert_eq!(listing.entries.len(), 16);
+            }
+            other => panic!("expected the directory to be read, got {other:?}"),
+        }
+    }
+
+    /// Checked before the FAT is consulted, so an out-of-range cluster is an
+    /// error about the entry rather than an offset into the FAT.
+    #[test]
+    fn a_deleted_directory_outside_the_volume_is_an_error() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        for cluster in [0, 1, CLUSTER_COUNT + 2] {
+            assert!(matches!(
+                enumerate_deleted_directory(&mut image, &boot, extent(), cluster),
+                Err(DirectoryError::ClusterOutOfRange { .. })
+            ));
+        }
+    }
+
+    /// ADR-0016 Decision A. A live directory is read along its chain.
+    #[test]
+    fn a_live_directory_is_read_along_its_chain() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+        let [dot, dot_dot] = dots(10);
+        let mut first = vec![dot, dot_dot];
+        first.extend((1..=14).map(numbered));
+        image.write_cluster(10, &first);
+        image.write_cluster(12, &[numbered(15)]);
+        image.write_fat(FAT0_BASE, 10, 12);
+        image.write_fat(FAT0_BASE, 12, 0x0FFF_FFF8);
+
+        let directory = enumerate_directory(&mut image, &boot, extent(), 10).expect("reading");
+
+        assert_eq!(directory.clusters, vec![10, 12]);
+        assert_eq!(directory.entries.len(), 17);
+    }
+
+    /// ADR-0016 Decision B. Exactly `.` and `..`, as directories: a
+    /// directory merely named with dots, or a file named `.`, is not one.
+    #[test]
+    fn only_the_two_dot_entries_are_dot_entries() {
+        let [dot, dot_dot] = dots(10);
+        assert!(is_dot_entry(&classify(&dot)));
+        assert!(is_dot_entry(&classify(&dot_dot)));
+
+        assert!(!is_dot_entry(&classify(&directory_entry(
+            b"DOT        ",
+            10
+        ))));
+        assert!(!is_dot_entry(&classify(&entry(&DOT_NAME, ATTR_ARCHIVE))));
+    }
 }

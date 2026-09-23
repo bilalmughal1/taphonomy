@@ -16,6 +16,13 @@ use std::process::{Command, Output};
 use taphonomy::Sha256Digest;
 use taphonomy::hash::hash_reader;
 
+/// Digests of the three files inside `fat32-deleted-subtree.img`, taken
+/// from the content `scripts/generate-fixtures.sh` writes: each file holds
+/// its own name and a newline.
+const ALPHA_DIGEST_HEX: &str = "7144bb30418262f6995f3ad55b7e3147213c088fd9c65a166242a1b873cc10f3";
+const BETA_DIGEST_HEX: &str = "aa58025d4c86a81175aa87ef17f1806b29a021e7483cac0b9654a6f95fa9f2c5";
+const GAMMA_DIGEST_HEX: &str = "87ff853631aedb5277ccab38be53e6e8418e14d3902718a30e552964a8699ac4";
+
 /// `BIG.TXT`'s content digest, as `ADR-0013` section 16.1 records it.
 const BIG_DIGEST_HEX: &str = "5ecddc870bcf7d8525574328f548af954ac1ab8d1d56555b40d01d2977a21a91";
 
@@ -324,4 +331,29 @@ fn an_unwritable_destination_is_reported_without_a_partial_file() {
     assert!(text.contains("artifacts not written"), "{text}");
     assert!(text.contains(BIG_DIGEST_HEX), "{text}");
     assert!(written_files(&dir).is_empty());
+}
+
+/// `ADR-0016` section 11, conditions 2 and 4. Three files inside a deleted
+/// subtree are recovered, at depths one and two, and each digest is the
+/// digest of the content the generator wrote, so a wrong run is caught by a
+/// value computed outside this tool.
+///
+/// The dot entries are listed and never followed: a path never re-enters
+/// the directory it came from, and nothing is refused.
+#[test]
+fn the_files_inside_a_deleted_subtree_are_recovered() {
+    let output = run(&[&fixture("fat32-deleted-subtree.img"), "--recover"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let text = stdout(&output);
+    for digest in [ALPHA_DIGEST_HEX, BETA_DIGEST_HEX, GAMMA_DIGEST_HEX] {
+        assert!(text.contains(digest), "{digest} missing from: {text}");
+    }
+    assert!(text.contains("deleted directory /?ONE"), "{text}");
+    assert!(text.contains("deleted directory /?ONE/?EEP"), "{text}");
+    assert!(!text.contains("directory /."), "{text}");
+    assert!(!text.contains("/?ONE/."), "{text}");
+    assert!(!text.contains("NOT READ"), "{text}");
+    assert!(text.contains("coverage     complete"), "{text}");
 }

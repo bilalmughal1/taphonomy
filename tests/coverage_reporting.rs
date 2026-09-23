@@ -239,3 +239,35 @@ fn a_reference_is_counted_against_every_extraction() {
         "reported: {summary}"
     );
 }
+
+/// `ADR-0016` Decisions A and D, and section 11 condition 3. A deleted
+/// directory is read as far as its first cluster and no further.
+///
+/// In `fat32-deleted-split-directory.img` that cluster holds no terminator,
+/// so the listing may continue; the cluster it continued into, 20, is
+/// reachable from nothing, and with it `TAIL` at 19 and `OMEGA.TXT` at 21.
+/// Cluster 4 is `PAYLOAD.BIN`'s data, and EXP-0005 finding 6 measured what
+/// reading it as the continuation would produce: entries that look live and
+/// name clusters far beyond the volume.
+#[test]
+fn a_deleted_directory_is_read_no_further_than_its_first_cluster() {
+    let output = run(&[&fixture("fat32-deleted-split-directory.img")]);
+
+    assert_eq!(output.status.code(), Some(0));
+
+    let text = stdout(&output);
+    assert!(text.contains("deleted directory /?IG"), "{text}");
+    assert!(
+        text.contains("listing may continue: cluster 3 holds no terminator"),
+        "{text}"
+    );
+    for unreached in ["c4 s", "c19 s", "c20 s", "c21 s"] {
+        assert!(!text.contains(unreached), "read {unreached} from: {text}");
+    }
+
+    let summary = summary(&output);
+    assert!(
+        summary.contains("listings that may continue 1"),
+        "reported: {summary}"
+    );
+}
