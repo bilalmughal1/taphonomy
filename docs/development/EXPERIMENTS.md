@@ -1767,3 +1767,251 @@ before are unchanged.
 
 1. Bring the descriptive documents up to what the tool now does.
 2. Record M11 in `CHANGELOG.md`.
+
+---
+
+## EXP-0007: What a quick format leaves of a DCF directory tree
+
+**Date:** 2026-09-23
+**Milestone:** prerequisite to reading directories no surviving entry
+names, whose ADR is not yet written
+**Related:** ADR-0001 §10; ADR-0002 §8; ADR-0006 §5.1, §6; ADR-0014
+Decision A, Appendix B.2; ADR-0016 Decisions A, C and D, §10; EXP-0005;
+`src/fat_recovery.rs` `eligibility`
+
+---
+
+### Question
+
+1. When a FAT32 volume holding a DCF-shaped tree is formatted again with
+   the same geometry, what survives of its directories and the files they
+   list?
+2. Would a directory that survives pass `ADR-0016` Decision C's three
+   checks as they stand?
+3. What does the volume look like once it has been written to after the
+   format, as a camera does on its next shot?
+4. What does the tool report on each volume at `8504cd8`?
+
+### Why it matters
+
+`ADR-0016` §10 records that the tool does not find a directory no
+surviving entry names. EXP-0005 measured one such case, the later cluster
+of a deleted directory. A format is the other: it rewrites the boot
+sector, the FATs and the root, so every directory below the root is named
+by nothing. `ADR-0014` Appendix B.2 records that on a DCF camera card no
+image file sits in the root, so a formatted card is one on which the tool
+has nothing to walk.
+
+Whether such a volume is within this project's scope depends on what
+survives. `ADR-0001` §10 separates filesystem-aware recovery, which uses
+directory records and allocation metadata, from carving; `ADR-0002` §8
+leaves carving to a later decision. If the directory records survive,
+reading them is the former. If they do not, only carving is left.
+
+### Hypothesis
+
+Stated before the volumes below were built, from measurements on a bare
+volume taken earlier the same day and not recorded:
+
+1. A quick format leaves every subdirectory's first cluster intact, its
+   FAT entry 0, `.` naming itself at slot 0 and `..` at slot 1.
+2. The entries of the files those directories list are not marked
+   deleted, and keep their first cluster and size.
+3. Every file's implied run is free and holds its original bytes.
+4. Written to once more, the volume puts its new `DCIM` and `100TAPH` on
+   the clusters the old ones held, and the old directories are gone.
+
+On the bare volume the root was predicted to be empty after the format. It
+held the new volume label, so that prediction was wrong; the tool finds
+nothing to recover there either way.
+
+### Input
+
+Two volumes with the geometry of every fixture in the set: 131,072
+sectors of 512 bytes, one partition at LBA 2048, FAT32 over the remainder,
+one sector per cluster.
+
+`formatted.img` holds `DCIM/100TAPH` containing `IMG_0001.JPG` and
+`IMG_0002.JPG`, each holding its own name, and `IMG_0003.JPG`, holding its
+own name repeated to 1,300 bytes so that its run spans three clusters. The
+volume is then formatted again.
+
+`reused.img` is built the same way and formatted, and `DCIM`,
+`DCIM/100TAPH` and a new `IMG_0001.JPG` holding `NEW_0001.JPG` are then
+written.
+
+### Environment
+
+Two environments, with the same package versions measured by
+`dpkg-query`:
+
+```text
+mtools       4.0.43-1build1
+dosfstools   4.2-1.1build1
+util-linux   2.39.3-9ubuntu6.6
+```
+
+An Ubuntu 24.04.4 container off the development machine, and the
+development machine itself. The tool was run on the development machine
+only, at `8504cd8`.
+
+### Method
+
+`SOURCE_DATE_EPOCH=1577836800`, `TZ=UTC` and `MTOOLS_SKIP_CHECK=1`, as
+`ADR-0006` §6 Condition 1 requires. The partition table is written by
+`sfdisk` with disk signatures `0xfa7300e3` and `0xfa7300e4`, and the
+volume by the generator's own invocation,
+`mkfs.vfat --invariant --mbr=n -F 32 -n TAPHFIX --offset=2048`. The format
+is that same invocation run a second time over the populated volume. With
+`V` the image at byte offset 1,048,576:
+
+```text
+formatted.img  mmd ::/DCIM
+               mmd ::/DCIM/100TAPH
+               mcopy 1 ::/DCIM/100TAPH/IMG_0001.JPG
+               mcopy 2 ::/DCIM/100TAPH/IMG_0002.JPG
+               mcopy 3 ::/DCIM/100TAPH/IMG_0003.JPG
+               mkfs.vfat (as above)
+
+reused.img     as formatted.img, then
+               mmd ::/DCIM
+               mmd ::/DCIM/100TAPH
+               mcopy new ::/DCIM/100TAPH/IMG_0001.JPG
+```
+
+No byte is poked. Each volume was built twice per run and compared, and
+the whole run was repeated in each environment. `mshowfat` read every
+chain before the format. After it, clusters 2 to 4 were read with `od`,
+their first five slots decoded field by field, and each file's run hashed
+with `dd` and `sha256sum`, independently of the tool. The tool was then
+run on each image with no arguments.
+
+The first version of the method decoded only slots 0 and 1, which cannot
+show hypothesis 2. It was corrected before this record, and both versions
+produced the same image digests.
+
+### Expected result
+
+As hypothesised, and the tool reporting nothing recoverable on either
+volume, with coverage complete and exit status 0.
+
+### Actual result
+
+**Determinism.** Every build of each image was identical, in both
+environments:
+
+```text
+94d34d3cf21237538049f2b729f98e63cba8c61f63df9c42531d8403cbfbd9ce  formatted.img
+1280a9057f2c78fc5228e37ec6df3738163c57aaa67a6a0e8330aa806abae94f  reused.img
+```
+
+The tool's own digest of each image agreed.
+
+**Chains before the format,** exactly as predicted:
+
+```text
+::/DCIM <3>                      ::/DCIM/100TAPH/IMG_0002.JPG <6>
+::/DCIM/100TAPH <4>              ::/DCIM/100TAPH/IMG_0003.JPG <7-9>
+::/DCIM/100TAPH/IMG_0001.JPG <5>
+```
+
+**After the format,** in `formatted.img`:
+
+| Cluster | FAT | Slots |
+| --- | --- | --- |
+| 2, the root | `0xffffff8` | volume label `TAPHFIX`, then zero |
+| 3, `DCIM` | 0 | `.`→3, `..`→0, directory `100TAPH` →4, then zero |
+| 4, `100TAPH` | 0 | `.`→4, `..`→3, `IMG_0001JPG` →5 size 13, `IMG_0002JPG` →6 size 13, `IMG_0003JPG` →7 size 1,300 |
+
+Each file entry's first byte is `0x49`, not `0xE5`, and its attribute is
+`0x20`. The runs 5, 6 and 7 to 9 hash to the content written:
+
+```text
+86a773f90bcf220bea99ad333fdc1476de79daddba2ea7e017de7f302e394417  IMG_0001.JPG
+6aaed5ab92714c55bf157801cb012d61cfcdec8b5abcff7059722582da8c951f  IMG_0002.JPG
+01910a698db4916cbeb1ae6311f0d4e9e38e9e26b753db0747e0e41c002530ee  IMG_0003.JPG
+```
+
+**After the reuse,** in `reused.img`: the root lists `DCIM` →3. Clusters 3
+and 4 read `0xfffffff` in the FAT and hold the new tree, `.` and `..` as
+before. Cluster 4 lists only the new `IMG_0001JPG` →5 size 13, and slots 3
+and 4 are zero. Cluster 5 hashes to `f10d526e…`, the new content. The runs
+of `IMG_0002.JPG` and `IMG_0003.JPG` still hash to the digests above.
+
+**What the tool reports,** at `8504cd8`:
+
+| Image | Reported |
+| --- | --- |
+| `formatted.img` | root: the volume label only; nothing recovered; coverage complete; exit 0 |
+| `reused.img` | `/DCIM/100TAPH` walked; one live `IMG_0001.JPG`, 13 bytes, cluster 5; nothing recovered; coverage complete; exit 0 |
+
+### Conclusion
+
+1. **A quick format leaves the tree below the root whole.** Both
+   directories' first clusters survive and pass `ADR-0016` Decision C's
+   three checks unchanged: FAT entry 0, `.` naming the cluster it sits in,
+   `..` present. `..` still links `100TAPH` to `DCIM`, and `DCIM` to the
+   root.
+2. **The files they list are not deleted entries.** Their first byte is
+   intact and their first cluster and size survive. `eligibility` in
+   `src/fat_recovery.rs` offers only deleted entries for recovery, so the
+   tool would not offer these even if it read the directory.
+3. **Every file survives, and is reachable only through an orphaned
+   directory.** All three runs are free and hold their original bytes.
+   Recovering them from these entries infers each run from a first cluster
+   and a size, the method `ADR-0014` Decision A §5.1 classifies for every
+   artifact the tool produces.
+4. **The tool reports this volume as completely covered.** Three
+   recoverable files sit on it, and nothing in the output says they might.
+   Under `ADR-0014` Appendix A.6 coverage states the tool's reach, and the
+   report is correct by that rule; it is the same situation Appendix B.2
+   recorded for unread subdirectories.
+5. **One write after the format destroys the directories, not the data.**
+   The recreated tree takes clusters 3 and 4 and clears them, so no record
+   of `IMG_0002.JPG` or `IMG_0003.JPG` remains in any directory, while
+   their bytes survive intact. On that volume only carving can reach them.
+
+### Limitations
+
+1. One formatter. `mkfs.vfat` stands in for a camera's format, which is
+   not measured. Vendor sources report that some cameras erase the card
+   instead, which would leave nothing.
+2. The same geometry before and after. A format with a different cluster
+   size or FAT size moves the data area, so an old directory's `.` would
+   no longer name the cluster it is read as, and Decision C's check would
+   refuse it. Not measured.
+3. One cluster size. The unrecorded bare-volume measurement used 4,096-byte
+   clusters and random content and agreed, but its images cannot be
+   reproduced and it is not counted.
+4. One allocator for the reuse. `mtools` placed the recreated tree on the
+   lowest free clusters; a camera's firmware may not.
+5. Every file is contiguous by construction. A file fragmented before the
+   format has the same false positive `KNOWN_ISSUES.md` records for a
+   deleted one.
+6. 8.3 names only, as in EXP-0005.
+
+### External practice
+
+The Sleuth Kit's FAT implementation notes describe treating every sector
+of the data area as though it could hold directory entries, and scanning
+for those that do (SleuthKitWiki, *FAT Implementation Notes*, accessed
+2026-09-23). That accepts any plausible entry. Issue 2900 in the
+`sleuthkit` repository, opened 2024-03-17, asks for orphaned FAT
+directories to be found by their `.` and `..` entries, and states that
+IsoBuster already does so. Decision C's checks are narrower than either:
+`.` must name the cluster it sits in.
+
+Several recovery vendors state that cameras and operating systems format
+quickly by default, leaving the data area in place. These are commercial
+sources and are recorded as context, not as evidence.
+
+### Next action
+
+1. Record, in an ADR citing this record, how directories that no
+   surviving entry names are found, read and reported, and how the files
+   they list are offered for recovery.
+2. Add both volumes to `scripts/generate-fixtures.sh`: `formatted.img` as
+   the case where such directories are found, `reused.img` as the case
+   where none is.
+3. Measure the same search against the existing split fixture, where
+   EXP-0005 recorded that `TAIL` at cluster 19 carries `.`→19 and `..`→3.
