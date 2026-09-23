@@ -143,6 +143,19 @@ history.
 - `--output <directory>`, writing each recovered artifact to a file named
   from the entry's slot and first cluster, so no byte of evidence reaches
   the path (ADR-0015 Decisions A and D)
+- Every directory the root reaches read: a live one along its cluster chain,
+  a deleted one from its first cluster alone (ADR-0016 Decisions A and B)
+- A deleted directory's first cluster read only where the FAT marks it free
+  and it carries `.` naming that cluster and `..`, and reported with the
+  check it failed otherwise (ADR-0016 Decision C)
+- A listing that may continue beyond a deleted directory's first cluster
+  counted as a coverage gap of its own kind, the thirteenth (ADR-0016
+  Decision D)
+- Bounds on the walk: no cluster read twice, and nothing deeper than 128
+  levels below the root, each reported as a gap (ADR-0016 Decision E)
+- Fixtures for a deleted subtree, a deleted directory whose clusters are not
+  adjacent, 130 nested directories, a directory loop, and two deleted
+  entries sharing a slot and a first cluster (EXP-0005, EXP-0006)
 - Read-back verification of every written artifact: the file is re-opened,
   hashed, and reported as matching or differing from what was read, which
   states what landed rather than what was sent (ADR-0015 Decision H)
@@ -173,6 +186,21 @@ history.
 - The recovery digest line is labelled `recovered` and the comparison line
   `reference`, so the recovered-file hash and the validation hash are
   distinguishable wherever both appear (`docs/SAFETY.md` §10)
+- A recovered artifact is named from the entry's own cluster as well as its
+  slot and first cluster; a slot alone repeats in every directory cluster,
+  so two entries could previously receive one name and the second be
+  reported as a file that already existed (ADR-0016 Decision F)
+- A destination that cannot be created is reported as not created; it was
+  reported as a failure that had left a partial file behind, which an
+  unwritable `--output` directory produced for every entry (ADR-0015
+  Appendix B.1)
+- A failed flush is a failed write: the file is removed and reported as not
+  written, where it was reported as written and unverified (ADR-0015
+  Appendix B.1)
+- A partial file that survives an evidence failure is reported beside that
+  failure; the removal's own failure was silent (ADR-0015 Appendix C)
+- A partial file left by a failed write is removed when the evidence then
+  fails too; only a file still open was removed (ADR-0015 Appendix B.1)
 - Recovery caveats print once per volume rather than once per set of
   entries. On a volume holding a recoverable deleted entry past the
   directory terminator they previously appeared twice in one run

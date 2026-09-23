@@ -205,6 +205,20 @@ would need `unsafe` code or a new dependency, and neither is adopted.
 
 ---
 
+## A directory the walk declines to read hides everything inside it
+
+`ADR-0016` Decision E stops the walk at a cluster already read and 128
+levels below the root, and Decision C refuses a deleted directory whose
+first cluster does not identify itself. Each is reported as one gap, and the
+count is of directories the walk reached, not of what they hold.
+
+`fat32-nested-directories.img` measures it: the 129th level is refused and
+counted, and the 130th is named only inside the cluster that was refused, so
+it is never reached and never counted. A single gap can therefore stand for
+a subtree of any size, and the report says which directory it was.
+
+---
+
 ## Four test suites are dominated by whole-image reads
 
 `tests/cli_arguments.rs` runs the binary rather than calling into the
@@ -224,19 +238,20 @@ opened.
 
 `tests/fat32_recovery_fixtures.rs` is comparable, and for a different
 reason. It calls into the crate and spawns no process, so the cost is not
-the binary: it is opening 64 MB fixtures. Measured 2026-09-22 at `3f14a7f`:
+the binary: it is opening 64 MB fixtures. Measured 2026-09-23 at `75deb58`:
 
 ```text
-tests/coverage_reporting.rs       8 tests  22.08s
-tests/cli_arguments.rs           11 tests  16.42s
-tests/recovery_output.rs          7 tests  13.15s
-tests/fat32_recovery_fixtures.rs 24 tests   8.22s
+tests/coverage_reporting.rs      11 tests  30.20s
+tests/recovery_output.rs          9 tests  19.89s
+tests/cli_arguments.rs           11 tests  16.66s
+tests/fat32_recovery_fixtures.rs 24 tests   8.40s
 ```
 
-Every other harness in the workspace finishes in under a tenth of a second,
-and the nine of them together took 0.13 seconds in that run. Wall times vary
-between runs: the same day at `a38a8cb`, `coverage_reporting` took 31.82
-seconds.
+Every other harness in the workspace finishes in under a fifth of a second,
+and the nine of them together took 0.33 seconds in that run. Wall times vary
+between runs: the same day at `739d308`, `coverage_reporting` took 45.83
+seconds. Reading subdirectories lengthened them again: a run over the
+subtree fixture now recovers three files rather than reporting one gap.
 
 A fixture small enough for tests that only need an argument decision would
 help the three suites that run the binary and not

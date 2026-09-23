@@ -55,8 +55,10 @@ compares against what it was given, and reports that nothing was validated
 when it was given nothing. See
 `docs/decisions/ADR-0013-m8-reference-validation-decisions.md`.
 
-A run states its own coverage. A directory that was listed and not read, a
-partition whose filesystem is not FAT32, a boot sector refused: each is
+A run states its own coverage. A directory that could not be read, a deleted
+directory whose listing may continue beyond the one cluster the evidence
+locates, a partition whose filesystem is not FAT32, a boot sector refused:
+each is
 counted, named, and reported, and the run is described as having covered
 the evidence completely, incompletely, or not at all. Coverage is about
 reach and not about correctness. A run can cover everything it could reach
@@ -97,9 +99,10 @@ stands, is recorded in `docs/development/KNOWN_ISSUES.md`.
 | 2 | An argument error; no evidence was opened |
 | 3 | Nothing past the evidence digest was analysed |
 
-A gap in coverage does not by itself change the status. While subdirectories
-are not read, a volume holding one is analysed in part and exits 0, and the
-gap is reported on standard output. A digest that differs from the reference
+A gap in coverage does not by itself change the status. A volume holding a
+deleted directory whose listing may continue, or one the run declined to
+read, is analysed in part and exits 0, and the gap is reported on standard
+output. A digest that differs from the reference
 is a finding about the evidence and also exits 0.
 
 ---
@@ -322,8 +325,12 @@ At this stage:
   file's; only a reference digest can establish that
 * only FAT32 is parsed beyond the partition table; exFAT and NTFS are
   identified and reported as unsupported
-* FAT32 support stops at the root directory; subdirectories are not read,
-  and every directory listed is reported as a gap in the run's coverage
+* a deleted directory is read from its first cluster alone: its chain is
+  zeroed, so no later cluster of it can be located, and a listing that may
+  have continued past that cluster is reported as a gap
+* the walk reads no cluster twice and stops 128 levels below the root; each
+  is reported as a gap, and a directory below one of those bounds hides
+  everything named inside it
 * only an unfragmented deleted file is recovered; a run reaching an
   allocated cluster is refused rather than reconstructed
 * recovered content is compared only against a reference the operator
