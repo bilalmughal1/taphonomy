@@ -1640,3 +1640,130 @@ read inside a deleted directory, and this tool does not.
 2. Add a fixture built by this construction to
    `scripts/generate-fixtures.sh`, so that the gap closes against a volume
    where reading subdirectories finds something.
+
+---
+
+## EXP-0006: Building the volumes ADR-0016's bounds need
+
+**Date:** 2026-09-23
+**Milestone:** M11, closing `ADR-0016` section 11 conditions 6 and 7
+**Related:** `ADR-0016` Decisions E and F, section 11; `ADR-0006` §5.2, §6;
+EXP-0004; EXP-0005
+
+---
+
+### Question
+
+`ADR-0016` Decision E reads at most 128 levels and reads no cluster twice,
+and Decision F names an artifact by its entry's own cluster and slot. No
+fixture exercised any of the three.
+
+1. Can `mtools` alone nest directories deeper than 128 levels?
+2. Can `mtools` alone produce a directory entry naming an ancestor?
+3. Can `mtools` alone produce two deleted entries at the same slot of
+   different directories naming the same first cluster?
+4. What does the tool report on each volume once built?
+
+### Why it matters
+
+A bound that no fixture reaches is a bound nobody has seen work. `ADR-0006`
+§5.2 prefers a fixture built by ordinary tools, and permits a poke where no
+tool produces the arrangement, so which of these need poking decides how
+the fixtures are built and what the poke has to be checked against.
+
+### Hypothesis
+
+1. `mmd` nests without a depth limit of its own.
+2. No `mtools` command writes an entry naming an ancestor: every one of them
+   maintains the tree.
+3. `mtools` reuses a freed cluster, so deleting a file and writing another
+   would put two entries on the same cluster without a poke.
+
+### Environment
+
+An Ubuntu 24.04.4 container off the development machine: `mtools`
+4.0.43-1build1, `dosfstools` 4.2-1.1build1, util-linux 2.39.3-9ubuntu6.6.
+The fixture digests and the tool's output were measured on the development
+machine at `909fb6a`.
+
+### Method
+
+Volumes of the fixture set's geometry, built as `ADR-0006` §6 Condition 1
+requires. For the depth question, `mmd` was called in a loop with one more
+`/D` each time until it failed or 130 levels existed. For the reuse
+question, `/A/X.TXT` was written, its chain read with `mshowfat`, deleted,
+and `/B/Y.TXT` then written and its chain read. Directory clusters were
+read back from the image with a reader independent of the tool.
+
+### Expected result
+
+As hypothesised: deep nesting builds, the loop needs a poke, and the
+collision does not.
+
+### Actual result
+
+**1. Depth: 130 levels built with `mmd` alone.** The deepest path is 262
+characters, each level takes one cluster, and the deepest is cluster 132.
+
+**2. The loop needs a poke,** as expected. `mmd` maintains the tree.
+
+**3. `mtools` does not reuse a freed cluster.** `/A/X.TXT` took cluster 5.
+After `mdel`, `/B/Y.TXT` took cluster **6**, not 5. EXP-0004 recorded reuse
+only after the allocator wraps the volume, which at 127,006 clusters no
+fixture will reach. The hypothesis was wrong, and the collision fixture
+therefore needs a poke as well.
+
+**4. Both pokes are one byte** in a directory entry's first-cluster low
+word, written with `poke_expecting` against the value the entry already
+holds, at an offset computed from the volume's own BIOS parameter block:
+
+```text
+fat32-directory-loop.img     cluster 3, slot 2: 4 -> 3
+fat32-slot-collision.img     cluster 4, slot 2: 6 -> 5
+```
+
+**5. The three fixtures are deterministic.** `verify-fixtures.sh` reports
+25 of 25 byte-identical across runs, and the 22 fixtures that existed
+before are unchanged.
+
+**6. What the tool reports,** measured at `909fb6a`:
+
+| Fixture | Reported |
+| --- | --- |
+| `fat32-directory-loop.img` | `/A` listed once; `/A/B` not read, because cluster 3 was already read; one gap; incomplete |
+| `fat32-nested-directories.img` | 128 levels read, the deepest at cluster 130; the 129th not read, deeper than the bound; **one** gap; incomplete |
+| `fat32-slot-collision.img` | both entries recovered from cluster 5 with the same digest, written as `c3-s2-first-5.bin` and `c4-s2-first-5.bin`; coverage complete |
+
+### Conclusion
+
+1. Nesting past the bound needs no poke; the loop and the collision each
+   need one byte, which `ADR-0006` §5.2 permits where no tool produces the
+   arrangement.
+2. **The depth bound leaves one gap, not one for every level beneath it.**
+   The 130th level is named only inside the 129th's cluster, and that
+   cluster was not read, so the 130th is never reached. A prediction of two
+   gaps was made before the run and was wrong.
+3. Decision F's name holds where Decision D's did not. Two entries sharing
+   a slot and a first cluster are two files, and under the old name the
+   second would have been reported as a file that already existed.
+4. Cluster 5 is recovered twice, once for each entry, with the same digest.
+   The tool does not claim the two entries are the same file, and nothing in
+   the evidence says which of them the content belonged to.
+
+### Limitations
+
+1. One `mtools` version. Another allocator might reuse a freed cluster and
+   make the collision buildable without a poke.
+2. The loop built here is the shortest: an entry naming its own parent. A
+   longer cycle through several directories is not measured, though the
+   record of clusters read is the same for both.
+3. 130 levels only, two past the bound. A tree thousands deep is not
+   measured.
+4. The collision was built with both entries at slot 2. Entries at
+   different slots of the same cluster were already distinct under
+   `ADR-0015` Decision D and are not measured here.
+
+### Next action
+
+1. Bring the descriptive documents up to what the tool now does.
+2. Record M11 in `CHANGELOG.md`.
