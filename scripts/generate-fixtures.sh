@@ -1049,6 +1049,169 @@ EOF
     note "second reachable from nothing"
 }
 
+# Byte offset of a data cluster, computed from the volume's own BIOS
+# parameter block, as root_dir_offset is and for the same reason.
+cluster_offset() {
+    local path="$1" vbr="$2" cluster="$3"
+    local base bps spc
+    base=$(root_dir_offset "$path" "$vbr")
+    bps=$(od -An -tu2 -j $((vbr + 11)) -N 2 "$path" | tr -d ' ')
+    spc=$(od -An -tu1 -j $((vbr + 13)) -N 1 "$path" | tr -d ' ')
+    printf '%d\n' $(( base + (cluster - 2) * spc * bps ))
+}
+
+# Byte offset of a directory entry's first-cluster low word.
+entry_first_cluster_lo() {
+    local path="$1" vbr="$2" cluster="$3" slot="$4"
+    printf '%d\n' $(( $(cluster_offset "$path" "$vbr" "$cluster") + slot * 32 + 0x1A ))
+}
+
+# ---------------------------------------------------------------------------
+# 23. FAT32 volume nested 130 directories deep.
+#
+#     ADR-0016 Decision E reads 128 levels below the root and reports the
+#     rest as unread, so a volume must nest deeper than the bound for the
+#     bound to be measurable. EXP-0006 measured that mmd alone builds this:
+#     the deepest path is 262 characters and every level is one cluster.
+#
+#     ADR-0016 section 11, condition 6.
+# ---------------------------------------------------------------------------
+fixture_fat32_nested_directories() {
+    local path="$OUT_DIR/fat32-nested-directories.img"
+    printf 'fat32-nested-directories.img\n'
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa73000f
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local img nested i
+    img="${path}@@${VBR_OFFSET}"
+    nested="::"
+
+    for i in $(seq 1 130); do
+        nested="$nested/D"
+        MTOOLS_SKIP_CHECK=1 mmd -i "$img" "$nested"
+    done
+
+    # The first level takes cluster 3 and each level the next, so the
+    # deepest is cluster 132. A geometry change that moved them would leave
+    # a volume that still parses and tests a different depth.
+    expect_chain "$img" ::/D "::/D <3>"
+    expect_chain "$img" "$nested" "$nested <132>"
+
+    note "130 nested directories, deeper than the 128 levels read"
+}
+
+# ---------------------------------------------------------------------------
+# 24. FAT32 volume whose directory tree loops back on itself.
+#
+#     /A holds /A/B, and B's entry is then poked to name A's own first
+#     cluster. Walking it without a record of what has been read would
+#     re-enter A for ever. No mtools command produces this, which EXP-0006
+#     measured, so the entry is poked.
+#
+#     ADR-0016 Decision E, section 11, condition 6.
+# ---------------------------------------------------------------------------
+fixture_fat32_directory_loop() {
+    local path="$OUT_DIR/fat32-directory-loop.img"
+    printf 'fat32-directory-loop.img\n'
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730010
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local img offset
+    img="${path}@@${VBR_OFFSET}"
+
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/A
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/A/B
+
+    expect_chain "$img" ::/A "::/A <3>"
+    expect_chain "$img" ::/A/B "::/A/B <4>"
+
+    # B's entry sits at slot 2 of A's own cluster, 3: . and .. take slots 0
+    # and 1. The byte poked holds 4, B's first cluster, and becomes 3, A's.
+    offset=$(entry_first_cluster_lo "$path" "$VBR_OFFSET" 3 2)
+    poke_expecting "$path" "$offset" 04 3
+
+    note "a live directory entry naming its own parent's first cluster"
+}
+
+# ---------------------------------------------------------------------------
+# 25. FAT32 volume where two deleted entries share a slot and a cluster.
+#
+#     /A/X.TXT takes cluster 5 and is deleted; /B/Y.TXT then takes cluster 6,
+#     because EXP-0006 measured that mtools does not reuse a freed cluster,
+#     and is deleted too. Y's entry is poked to name cluster 5. Both entries
+#     are then slot 2 of their own directory and name the same first cluster,
+#     which is the collision ADR-0016 Decision F's name must survive: under
+#     ADR-0015 Decision D both were slot-2-cluster-5.bin.
+#
+#     ADR-0016 section 11, condition 7.
+# ---------------------------------------------------------------------------
+fixture_fat32_slot_collision() {
+    local path="$OUT_DIR/fat32-slot-collision.img"
+    printf 'fat32-slot-collision.img\n'
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730011
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work img offset
+    work="$(mktemp -d)"
+    img="${path}@@${VBR_OFFSET}"
+
+    printf 'X.TXT\n' > "$work/x"
+    printf 'Y.TXT\n' > "$work/y"
+
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/A
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/B
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/x" ::/A/X.TXT
+    expect_chain "$img" ::/A/X.TXT "::/A/X.TXT <5>"
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/A/X.TXT
+
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/y" ::/B/Y.TXT
+    expect_chain "$img" ::/B/Y.TXT "::/B/Y.TXT <6>"
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/B/Y.TXT
+
+    # Y's entry is slot 2 of B's cluster, 4. The byte poked holds 6, Y's own
+    # first cluster, and becomes 5, the cluster X.TXT's content still fills.
+    offset=$(entry_first_cluster_lo "$path" "$VBR_OFFSET" 4 2)
+    poke_expecting "$path" "$offset" 06 5
+
+    rm -rf "$work"
+
+    note "two deleted entries at the same slot of different directories,"
+    note "naming the same first cluster"
+}
+
 # ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
@@ -1075,6 +1238,9 @@ fixture_fat32_fragmented_deleted
 fixture_fat32_fragmented_live_gap
 fixture_fat32_deleted_subtree
 fixture_fat32_deleted_split_directory
+fixture_fat32_nested_directories
+fixture_fat32_directory_loop
+fixture_fat32_slot_collision
 
 # ---------------------------------------------------------------------------
 # Manifest
