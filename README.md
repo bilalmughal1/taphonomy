@@ -58,13 +58,12 @@ when it was given nothing. See
 A run states its own coverage. A directory that could not be read, a deleted
 directory whose listing may continue beyond the one cluster the evidence
 locates, a partition whose filesystem is not FAT32, a boot sector refused:
-each is
-counted, named, and reported, and the run is described as having covered
-the evidence completely, incompletely, or not at all. Coverage is about
-reach and not about correctness. A run can cover everything it could reach
-and still recover, for a fragmented deleted file, content that is not that
-file's. Every artifact carries one confidence level, `RECONSTRUCTED`, and a
-digest match is reported beside it rather than raising it. See
+each is counted, named, and reported, and the run is described as having
+covered the evidence completely, incompletely, or not at all. Coverage is
+about reach and not about correctness. A run can cover everything it could
+reach and still recover, for a fragmented deleted file, content that is not
+that file's. Every artifact carries one confidence level, `RECONSTRUCTED`,
+and a digest match is reported beside it rather than raising it. See
 `docs/decisions/ADR-0014-m9-classification-decisions.md`.
 
 The initial development sequence is:
@@ -102,8 +101,8 @@ stands, is recorded in `docs/development/KNOWN_ISSUES.md`.
 A gap in coverage does not by itself change the status. A volume holding a
 deleted directory whose listing may continue, or one the run declined to
 read, is analysed in part and exits 0, and the gap is reported on standard
-output. A digest that differs from the reference
-is a finding about the evidence and also exits 0.
+output. A digest that differs from the reference is a finding about the
+evidence and also exits 0.
 
 ---
 
