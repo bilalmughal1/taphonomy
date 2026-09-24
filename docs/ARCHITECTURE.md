@@ -1,14 +1,14 @@
 # Taphonomy Architecture
 
-> **Status notice:** This document describes an intended architecture. No
-> part of it is implemented. A section becomes binding only when
-> corresponding code and tests exist.
+> **Status notice:** This document describes an intended architecture. A
+> section becomes binding only when corresponding code and tests exist.
+> Section 47 records which sections that is true of, as of 2026-09-24.
 
 **Project:** Taphonomy
 **Document:** Architecture Specification
 **Version:** 0.1.0
-**Status:** Foundation
-**Last Updated:** 2026-08-28
+**Status:** Partly implemented; see section 47
+**Last Updated:** 2026-09-24
 
 ---
 
@@ -1149,3 +1149,58 @@ This document describes architectural boundaries, not a completed implementation
 
 No component described here should be interpreted as implemented unless corresponding code, tests, and documentation exist in the repository.
 
+---
+
+# 47. Implementation Map
+
+Which sections of this document now have corresponding code, as of
+2026-09-24. Where a section is marked built, it is binding; where it is not,
+it remains intent. `ADR-0011` Decision A defines the distinction.
+
+**Built.**
+
+| Section | Where |
+| --- | --- |
+| 5.2 Evidence Management | `src/evidence.rs` opens evidence read-only; `src/hash.rs` computes SHA-256 (`ADR-0004`) |
+| 5.4 Analysis | `src/partition.rs` (MBR, `ADR-0005`), `src/filesystem.rs`, `src/fat.rs`, `src/fat32.rs`, `src/fat_directory.rs` |
+| 5.5 Recovery | `src/fat_recovery.rs` (`ADR-0010`, `ADR-0015`) |
+| 15 Evidence Boundary | `EvidenceFile`; asserted by `tests/read_only.rs` |
+| 16 Reader Abstraction | The `EvidenceReader` trait, `read_exact_at` (`ADR-0007`) |
+| 18 Output Boundary | A destination holding the evidence is refused; each artifact is read back after writing (`ADR-0015`) |
+| 19 Error Model | Typed errors: `Error`, `ParseError`, `DirectoryError`, `RecoveryError`, `DigestParseError` |
+| 22 Determinism | Fixtures byte-identical on every build (`ADR-0006`, `scripts/verify-fixtures.sh`) |
+| 23 Concurrency | None is introduced; the tool is single-threaded |
+| 24 State Management | No global mutable state |
+| 28 Local-First | One dependency, `sha2`; nothing reaches a network |
+| 36 Candidate vs Verified Artifact | `src/confidence.rs` (`ADR-0003`, `ADR-0014`) |
+| 38, 39, 40 Testing, Fixtures, Laboratory | Unit tests, fourteen integration harnesses, generated fixtures, `docs/development/EXPERIMENTS.md` |
+
+**In part.**
+
+| Section | What exists, and what does not |
+| --- | --- |
+| 5.6 Validation | Comparison against an operator's reference digest (`ADR-0013`); no structural validation |
+| 5.7 Reporting | A text report on standard output, with coverage (`ADR-0014`); no structured report |
+| 7 Filesystem Implementations | FAT32 only; FAT12, FAT16, exFAT and NTFS are identified and not analysed |
+| 17 Virtual Evidence | Raw disk images and an in-memory test double; no physical or segmented evidence |
+| 13, 26 Dependency Direction, CLI Boundary | A binary over a library crate; the library is not layered |
+
+**Not built.** 5.1 Device Discovery; 5.3 Acquisition; 6 and 8 to 11, the
+domains beyond filesystem recovery from images; 20 Result Model; 21
+Operation Identity; 25 Configuration beyond command-line arguments; 27 and
+29 to 33, other interfaces, external tools, plugins, databases, web and
+desktop; 37 Observability; 41 Versioning; 42 Compatibility.
+
+**Invariants.** 1, 2 and 6 hold for the reasons in the tables above. 5
+holds: recovery is `src/fat_recovery.rs` and comparison against a reference
+is `src/validation.rs`. 10 holds: every capability has a decision record in
+`docs/decisions`. 3 and 9 hold for the library. 4 has nothing to act on
+yet, since there is no acquisition. 7 holds as far as parsing is
+bounds-checked; no fuzz testing exists (`SECURITY.md` section 36).
+
+**Invariant 8 is not met.** The directory walk and the orphan search,
+`report_root_directory`, `report_subdirectory`, `queue_subdirectories` and
+`search_orphaned_directories`, are domain logic and live in `src/main.rs`,
+the CLI binary. They should move into the library, which would also let
+their tests call them without running the binary. Recorded in
+`docs/development/KNOWN_ISSUES.md`.

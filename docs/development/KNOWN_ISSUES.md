@@ -40,8 +40,9 @@ above exists.
 Microsoft held patents on the VFAT long-filename mechanism and litigated
 them. Their current status has not been researched. ADR-0007 section 5.5
 records this as required before long-name decoding is implemented. It
-does not affect enumeration, which counts long-name entries without
-interpreting them.
+does not affect enumeration, which counts long-name entries, nor the
+recovery of a deleted short name's first character, which reads only a
+long-name entry's checksum (`ADR-0009` section 6); neither decodes a name.
 
 ## No fixture can exercise a zeroed first-cluster high word
 
@@ -321,3 +322,28 @@ inference too, which that layout rewards; on the interleaved layouts of
 DFR-05 the clusters it would pass over are free. Whether to adopt it,
 labelled as the inference it is, is a decision for its own ADR, measured on
 those images first.
+
+---
+
+## Domain logic lives in the CLI binary
+
+`docs/ARCHITECTURE.md` Invariant 8 says the CLI must not contain domain
+recovery logic. The directory walk and the orphan search do:
+`report_root_directory`, `report_subdirectory`, `queue_subdirectories` and
+`search_orphaned_directories` are in `src/main.rs`. Two consequences follow.
+Their tests must run the binary, and each run hashes a whole 64 MB image,
+which is most of why the four suites that spawn it are the slow ones. And a
+future interface over the library would have to repeat them. Moving them
+into the library is a refactor with no change in behaviour, best done
+before any new capability builds on the walk.
+
+---
+
+## No fuzz testing exists
+
+`SECURITY.md` sections 35 and 36 call for fuzzing the parsers. None exists:
+there is no fuzz target and no fuzzing dependency. The MBR, boot sector and
+directory entry parsers read untrusted bytes, are bounds-checked, and have
+tests for the malformed inputs the fixtures and unit tests construct.
+Inputs nobody thought to construct are untested, and that is the gap
+fuzzing closes.
