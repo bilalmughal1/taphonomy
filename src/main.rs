@@ -584,30 +584,35 @@ fn search_orphaned_directories(
             counts.listings_may_continue += 1;
         }
 
-        for entry in directory.entries.iter().chain(directory.residue.iter()) {
-            if is_dot_entry(&entry.kind) {
-                continue;
+        for slots in [&directory.entries, &directory.residue] {
+            for (index, entry) in slots.iter().enumerate() {
+                if is_dot_entry(&entry.kind) {
+                    continue;
+                }
+                let (first_cluster, name) = match &entry.kind {
+                    EntryKind::ShortName {
+                        name,
+                        directory: true,
+                        first_cluster,
+                        ..
+                    } => (*first_cluster, name.clone()),
+                    EntryKind::Deleted {
+                        was:
+                            DeletedKind::ShortName {
+                                surviving_name,
+                                directory: true,
+                                first_cluster,
+                                ..
+                            },
+                    } => (
+                        *first_cluster,
+                        deleted_segment(slots, index, surviving_name),
+                    ),
+                    _ => continue,
+                };
+                let name = name.unwrap_or_else(|| format!("c{first_cluster}"));
+                listed.push((cluster, name, first_cluster));
             }
-            let (first_cluster, name) = match &entry.kind {
-                EntryKind::ShortName {
-                    name,
-                    directory: true,
-                    first_cluster,
-                    ..
-                } => (*first_cluster, name.clone()),
-                EntryKind::Deleted {
-                    was:
-                        DeletedKind::ShortName {
-                            surviving_name,
-                            directory: true,
-                            first_cluster,
-                            ..
-                        },
-                } => (*first_cluster, recovered_name(b'?', surviving_name)),
-                _ => continue,
-            };
-            let name = name.unwrap_or_else(|| format!("c{first_cluster}"));
-            listed.push((cluster, name, first_cluster));
         }
 
         report_recovery(
@@ -674,41 +679,61 @@ fn queue_subdirectories(
     depth: usize,
     pending: &mut VecDeque<Pending>,
 ) {
-    for entry in directory.entries.iter().chain(directory.residue.iter()) {
-        if is_dot_entry(&entry.kind) {
-            continue;
-        }
+    for slots in [&directory.entries, &directory.residue] {
+        for (index, entry) in slots.iter().enumerate() {
+            if is_dot_entry(&entry.kind) {
+                continue;
+            }
 
-        let (first_cluster, segment, deleted) = match &entry.kind {
-            EntryKind::ShortName {
-                name,
-                directory: true,
+            let (first_cluster, segment, deleted) = match &entry.kind {
+                EntryKind::ShortName {
+                    name,
+                    directory: true,
+                    first_cluster,
+                    ..
+                } => (*first_cluster, name.clone(), false),
+                EntryKind::Deleted {
+                    was:
+                        DeletedKind::ShortName {
+                            surviving_name,
+                            directory: true,
+                            first_cluster,
+                            ..
+                        },
+                } => (
+                    *first_cluster,
+                    deleted_segment(slots, index, surviving_name),
+                    true,
+                ),
+                _ => continue,
+            };
+
+            // `ADR-0016` Decision G. A name that cannot be rendered is not
+            // guessed at; the directory is named by its first cluster instead.
+            let segment = segment.unwrap_or_else(|| format!("c{first_cluster}"));
+
+            pending.push_back(Pending {
                 first_cluster,
-                ..
-            } => (*first_cluster, name.clone(), false),
-            EntryKind::Deleted {
-                was:
-                    DeletedKind::ShortName {
-                        surviving_name,
-                        directory: true,
-                        first_cluster,
-                        ..
-                    },
-            } => (*first_cluster, recovered_name(b'?', surviving_name), true),
-            _ => continue,
-        };
-
-        // `ADR-0016` Decision G. A name that cannot be rendered is not
-        // guessed at; the directory is named by its first cluster instead.
-        let segment = segment.unwrap_or_else(|| format!("c{first_cluster}"));
-
-        pending.push_back(Pending {
-            first_cluster,
-            path: format!("{parent}/{segment}"),
-            depth: depth + 1,
-            deleted,
-        });
+                path: format!("{parent}/{segment}"),
+                depth: depth + 1,
+                deleted,
+            });
+        }
     }
+}
+
+/// The path segment a deleted directory's short entry names.
+///
+/// Its destroyed first byte is recovered as the listing recovers it, from
+/// the long-name components before it, so a heading and the entry it came
+/// from name the directory the same way; EXP-0008 found them disagreeing.
+/// Where nothing recovers the byte it is shown as `?`, as before.
+fn deleted_segment(slots: &[Entry], index: usize, surviving: &[u8; 10]) -> Option<String> {
+    let first = match associate(slots, index) {
+        Some(FirstByte::Recovered(byte)) => byte,
+        _ => b'?',
+    };
+    recovered_name(first, surviving)
 }
 
 /// Reads one directory below the root, reports it, and queues what it names.
@@ -1569,6 +1594,55 @@ mod tests {
             reference: None,
             output: None,
         }
+    }
+
+    /// EXP-0008. On `dfr-11-fat.dd` a deleted directory's entry read `name
+    /// SAGITT~1 recovered` while its heading read `/?AGITT~1`. The heading now
+    /// recovers the first byte as the entry does, from the long-name
+    /// component before it, whose checksum here is the one that image holds.
+    #[test]
+    fn a_deleted_directory_is_named_as_its_entry_recovers_it() {
+        let named = Directory {
+            entries: vec![
+                Entry {
+                    cluster: 2,
+                    slot: 3,
+                    kind: EntryKind::Deleted {
+                        was: DeletedKind::LongName { checksum: 0x35 },
+                    },
+                },
+                Entry {
+                    cluster: 2,
+                    slot: 4,
+                    kind: EntryKind::Deleted {
+                        was: DeletedKind::ShortName {
+                            surviving_name: *b"AGITT~1   ",
+                            directory: true,
+                            first_cluster: 5,
+                            file_size: 0,
+                            nt_res: 0,
+                        },
+                    },
+                },
+            ],
+            residue: Vec::new(),
+            clusters: vec![2],
+            observations: Vec::new(),
+        };
+        let mut pending = VecDeque::new();
+        queue_subdirectories(&named, "", 0, &mut pending);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].path, "/SAGITT~1");
+        assert!(pending[0].deleted);
+
+        // With no long-name component before it, nothing recovers the byte.
+        let bare = Directory {
+            entries: named.entries[1..].to_vec(),
+            ..named.clone()
+        };
+        let mut pending = VecDeque::new();
+        queue_subdirectories(&bare, "", 0, &mut pending);
+        assert_eq!(pending[0].path, "/?AGITT~1");
     }
 
     #[test]
