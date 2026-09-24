@@ -1315,6 +1315,63 @@ fixture_fat32_formatted_reused() {
 }
 
 # ---------------------------------------------------------------------------
+# 28. FAT32 volume holding a deleted tree 131 directories deep, one of whose
+#     dot entries is broken.
+#
+#     Built as fixture 23 is, one level deeper, then removed with mdeltree,
+#     which EXP-0005 measured marks every entry deleted and leaves . and ..
+#     intact. Level n takes cluster n + 2, so the deepest is cluster 133.
+#
+#     The walk reads levels 1 to 128 and declines 129, cluster 131, at the
+#     depth bound, though its first cluster still identifies itself. Level
+#     130, cluster 132, is named only inside 131, so nothing read names it
+#     and the orphan search finds it. It lists 131, cluster 133, whose .
+#     entry is then poked to name cluster 0, so the search cannot find it.
+#     ADR-0006 section 5.1 permits one field corrupted in a valid image.
+#
+#     ADR-0017 section 10, condition 6: the search does not read 131, which
+#     the walk declined, and reports 133 as a directory it did not find.
+# ---------------------------------------------------------------------------
+fixture_fat32_deleted_nested() {
+    local path="$OUT_DIR/fat32-deleted-nested.img"
+    printf 'fat32-deleted-nested.img\n'
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730014
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local img nested i offset
+    img="${path}@@${VBR_OFFSET}"
+    nested="::"
+
+    for i in $(seq 1 131); do
+        nested="$nested/D"
+        MTOOLS_SKIP_CHECK=1 mmd -i "$img" "$nested"
+    done
+
+    expect_chain "$img" ::/D "::/D <3>"
+    expect_chain "$img" "$nested" "$nested <133>"
+
+    MTOOLS_SKIP_CHECK=1 mdeltree -i "$img" ::/D
+
+    # Slot 0 of cluster 133 is its . entry, whose low cluster byte holds
+    # 133. It becomes 0, so the entry no longer names the cluster it is in.
+    offset=$(entry_first_cluster_lo "$path" "$VBR_OFFSET" 133 0)
+    poke_expecting "$path" "$offset" 85 0
+
+    note "a deleted tree deeper than 128 levels, its deepest . entry broken"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -1345,6 +1402,7 @@ fixture_fat32_directory_loop
 fixture_fat32_slot_collision
 fixture_fat32_formatted_tree
 fixture_fat32_formatted_reused
+fixture_fat32_deleted_nested
 
 # ---------------------------------------------------------------------------
 # Manifest
