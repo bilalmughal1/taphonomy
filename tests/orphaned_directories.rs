@@ -139,3 +139,40 @@ fn a_directory_hidden_by_a_terminator_is_found_empty() {
     assert_eq!(text.matches("orphaned directory").count(), 1, "{text}");
     assert!(!text.contains("orphaned content"), "{text}");
 }
+
+/// `ADR-0017` section 10, condition 6. The walk declines level 129 of the
+/// deleted tree at the depth bound, and the search does not read it though
+/// its first cluster still identifies itself. Level 130, named only inside
+/// 129, is found by the search. The level it lists, whose `.` entry was
+/// poked, is a directory the search did not find, and so a gap.
+#[test]
+fn the_search_keeps_the_walks_refusals_and_reports_what_it_cannot_find() {
+    let output = run(&[&fixture("fat32-deleted-nested.img")]);
+
+    assert_eq!(output.status.code(), Some(0));
+
+    let text = stdout(&output);
+    assert!(
+        text.contains("NOT READ: deeper than 128 levels below the root"),
+        "{text}"
+    );
+
+    let found: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("    orphaned directory"))
+        .collect();
+    assert_eq!(
+        found,
+        ["    orphaned directory c132, .. names c131"],
+        "{text}"
+    );
+
+    assert!(
+        text.contains("NOT READ: cluster 133 was not found by the search"),
+        "{text}"
+    );
+
+    let unread = format!("{:<26} 2", "directories not read");
+    assert!(text.contains(&unread), "{text}");
+    assert!(text.contains("coverage     incomplete"), "{text}");
+}
