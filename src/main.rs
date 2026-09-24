@@ -1397,8 +1397,8 @@ fn print_caveats(counts: &RunCounts, options: Options<'_>) {
     // contrary evidence, which is not the same thing and never becomes it.
     println!();
     println!("A free run means nothing has claimed those");
-    println!("clusters since deletion. It is not evidence");
-    println!("that the content there is this file's.");
+    println!("clusters since the entry lost them. It is not");
+    println!("evidence that the content there is this file's.");
 
     // ADR-0013 section 8.2. A match is byte equality with what the operator
     // supplied, and where the content is not distinctive that is weaker
