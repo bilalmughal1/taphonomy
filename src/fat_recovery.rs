@@ -711,10 +711,10 @@ fn stream<R: EvidenceReader>(
         // The same slice, in the same pass. A write failure stops the
         // writing and not the hashing: the digest is a fact about the
         // evidence and the destination has no say in it.
-        if let Sink::Open(file) = sink {
-            if let Err(e) = file.write_all(&buffer[..take]) {
-                *sink = Sink::Broken(e.to_string());
-            }
+        if let Sink::Open(file) = sink
+            && let Err(e) = file.write_all(&buffer[..take])
+        {
+            *sink = Sink::Broken(e.to_string());
         }
     }
 

@@ -166,12 +166,12 @@ fn main() -> ExitCode {
     // evidence is opened, because `SAFETY.md` section 12 lists a
     // source/destination collision among the conditions the tool fails
     // closed on.
-    if let Some(directory) = options.output {
-        if let Err(message) = check_destination(directory, Path::new(&path)) {
-            eprintln!("error: {message}");
-            eprintln!("{USAGE}");
-            return ExitCode::from(2);
-        }
+    if let Some(directory) = options.output
+        && let Err(message) = check_destination(directory, Path::new(&path))
+    {
+        eprintln!("error: {message}");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
     }
 
     match inspect(&path, options) {
