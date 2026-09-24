@@ -1046,3 +1046,30 @@ two-valued derivation and its word; §8's premise that every artifact is
 below `STRUCTURALLY_VALID`; and §12's steps from 3 onward.
 
 No decision here concerns what the tool recovers, refuses or validates.
+
+---
+
+## Appendix C: B.2's gap closed, and the directory B.2 could not see (2026-09-24)
+
+The body and Appendices A and B are not rewritten.
+
+### C.1 B.2's gap no longer arises
+
+B.2 made every listed directory a coverage gap, because the tool did not
+read the directories it listed. `ADR-0016` reads every directory the root
+reaches, a live one along its chain and a deleted one from its first
+cluster. §11 condition 8 there required the two tests B.2's gap made
+necessary to be replaced by tests of the gaps that remain; neither test
+exists at `3ff77f7`. A listed directory is now a gap only where one of
+`ADR-0016`'s own kinds applies. Appendix B.2's measurement stands as a
+record of the tool at `51d4ae0`.
+
+### C.2 `fat32-deleted-residue` holds a directory after all
+
+B.2 measured that image as listing no directory, and concluded that
+nothing on it was uncovered by the kind. That was true of what the tool
+could see: the fixture's poke makes `/gone`'s root slot the terminator, so
+no entry names it. `/gone`'s own cluster survived, and `ADR-0017`'s search
+finds it, at cluster 5, empty. `tests/orphaned_directories.rs` asserts it.
+B.2's statement was about the listing, and the listing was right; the
+directory was outside the tool's reach until M12.

@@ -268,3 +268,36 @@ reach a path the tool writes, which Decision F guarantees.
    `a_live_directory_that_was_not_entered_is_a_gap` and
    `a_directory_that_was_not_read_leaves_coverage_incomplete_and_exits_zero`,
    are replaced by tests of the gaps that remain rather than deleted.
+
+---
+
+## Appendix A: what M12 changed of §10 and §11 (2026-09-24)
+
+`ADR-0017` added a search, after the walk, for directories no read entry
+names. It changes two statements here and no decision. The body is not
+rewritten.
+
+### A.1 §10's second item is narrowed
+
+§10 records that M11 does not find a directory no surviving entry names.
+The walk still does not. The search now finds such a directory wherever its
+first cluster still names itself and the FAT marks it free (`ADR-0017`
+Decision A), and reports it on its own rather than under a path.
+
+### A.2 §11 condition 3 is revised
+
+Condition 3 required that `OMEGA.TXT` not appear on the split fixture.
+Under `ADR-0017` it appears: `TAIL`'s first cluster, 19, carries `.`→19 and
+`..`→3, as EXP-0005 recorded, so the search finds it and the listing there
+offers `OMEGA.TXT` for recovery. The test asserting the condition changed
+in the commit that added the search, `8315886`, and
+`tests/orphaned_directories.rs` asserts the recovery. The rest of the
+condition stands: cluster 4 is not read, and one listing may continue.
+
+### A.3 §10's third item, on 8.3 paths
+
+Paths still use 8.3 names. A deleted directory's first character is now
+recovered in its path from the long-name component before its entry, as
+its entry in the listing already was; EXP-0008 found the two disagreeing on
+a NIST image, and `3ff77f7` corrected the path. Long names are still not
+decoded.

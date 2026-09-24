@@ -1768,6 +1768,16 @@ before are unchanged.
 1. Bring the descriptive documents up to what the tool now does.
 2. Record M11 in `CHANGELOG.md`.
 
+### Appendix A: the permission to poke is §5.1, not §5.2 (2026-09-24)
+
+This record cites `ADR-0006` §5.2 three times, in its Related line, in Why
+it matters, and in Conclusion 1, for the rule that a fixture is built by
+ordinary tools and poked only where no tool produces the arrangement. That
+rule is the closing paragraph of §5.1, *Construct directory entries with
+the existing poke helpers*. §5.2 is *Loop device and mount*, and says
+nothing about poking. Every citation should read §5.1. The body is not
+rewritten; what the poke built and measured is unchanged.
+
 ---
 
 ## EXP-0007: What a quick format leaves of a DCF directory tree
