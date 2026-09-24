@@ -2015,3 +2015,211 @@ sources and are recorded as context, not as evidence.
    where none is.
 3. Measure the same search against the existing split fixture, where
    EXP-0005 recorded that `TAIL` at cluster 19 carries `.`→19 and `..`→3.
+
+---
+
+## EXP-0008: Three NIST deleted-file-recovery images, against The Sleuth Kit
+
+**Date:** 2026-09-24
+**Milestone:** after M12; external validation, no decision yet
+**Related:** ADR-0010 Decision C; ADR-0014 Decision A, Appendix A.11,
+Appendix B.4; ADR-0016; ADR-0017; EXP-0004; EXP-0005
+
+---
+
+### Question
+
+1. On images the project did not make, does Taphonomy identify the
+   partitions and filesystems correctly?
+2. Are the files it recovers the files that were deleted, byte for byte?
+3. Where a deleted file is fragmented, what does it do, and what does an
+   established tool do?
+4. How much of what was deleted does it reach?
+
+### Why it matters
+
+Every earlier measurement used volumes this project built with
+`mkfs.vfat` and `mtools`. A tool that agrees with its own fixtures has
+shown consistency, not correctness. NIST's Computer Forensic Reference
+Data Sets publish images built for exactly this class of tool: the
+CFReDS deleted-file-recovery page describes them as images for testing
+metadata-based recovery, not carving. Each is documented with the
+sectors every file occupied, so a recovery can be checked against the
+image's own layout rather than against either tool.
+
+### Hypothesis
+
+Stated before each image was run:
+
+1. `dfr-01-fat.dd`: the first two partitions are identified as FAT16 and
+   reported not analysed; the FAT32 partition lists one deleted file,
+   and Taphonomy and The Sleuth Kit recover identical bytes whose tags
+   name `Bellatrix.txt`.
+2. `dfr-02-fat.dd`: Taphonomy refuses `Bellatrix.txt`, because its
+   implied run crosses the live `Canopus.txt`. What The Sleuth Kit
+   recovers was stated as uncertain: either the correct file, if it
+   skips allocated clusters, or a mixture, if it does not.
+3. `dfr-11-fat.dd`: Taphonomy reads the deleted directory `Sagittarius`
+   from its first cluster and recovers its three files, at clusters 55,
+   71 and 87, each equal to the sectors NIST lists.
+
+### Input
+
+Three images from the CFReDS deleted-file-recovery page, retrieved
+2026-09-24, and the image layout document linked from the same page.
+Each image is 1,073,742,336 bytes with three primary partitions, of which
+the third is FAT32. Digests of what was served, then of each image
+decompressed with `bunzip2 -k`:
+
+```text
+4a9df428d55e5c6836f998882e36f77b595bd5bcbed077cb4cbbd25c593bce46  dfr-01-fat.dd.bz2
+460832716f0dc1d2817f7d2cd46a46f5f4418da6556287daa53e4d9a932dcc0a  dfr-02-fat.dd.bz2
+c88b9a683e920a3f0c5c70614a2074e4a2042c52ba550cf83a250e5d11006c79  dfr-11-fat.dd.bz2
+5d5bf8fb15a1df463fb0b9c0a958c05ece30941af40545f895131ff0daf32fab  dfr-01-fat.dd
+ec86439d835444113cb744add3baee101394494883d5e79ff87bd64eb0189d54  dfr-02-fat.dd
+08340c17a76ac4e7173388e0249665ab740dd0e1b4646579fef3440ba4d60505  dfr-11-fat.dd
+```
+
+The layout document was read in a Markdown conversion of the published
+PDF, `b9c89a455b39e20386d4595e3aa2bd28843cf0f0703bd2f4395d0668df1abaa0`;
+the sections used are Test Images fat-01, fat-02 and fat-11, pages 92,
+95 and 145 of the original.
+
+### Environment
+
+The development machine: Ubuntu under WSL2, Rust 1.98.0. Taphonomy built
+with `cargo build --release` at `4bd85d8`. The Sleuth Kit 4.12.1 from
+the Ubuntu package `sleuthkit` 4.12.1+dfsg-1.1ubuntu2.
+
+### Method
+
+For each image: `mmls` for the partition table; `fls -r -o 82048` for
+The Sleuth Kit's listing of the FAT32 partition; Taphonomy with
+`--recover --output`, timed; `icat -r -o 82048` for The Sleuth Kit's
+recovery of each deleted file on that partition. The ground truth for
+each file was cut from the image with `dd` at the sectors the layout
+document lists for it, and every recovery compared by SHA-256. Content
+was read with `strings`: NIST's `mk-file` tags each file's blocks with
+its name, so a recovered file's origin can be read from its bytes.
+
+### Expected result
+
+As hypothesised.
+
+### Actual result
+
+**Identification.** Taphonomy's classification of the first partition
+equals the true type the CFReDS page lists for each image: FAT16 on
+`dfr-01` and `dfr-02`, FAT12 on `dfr-11`. On the two whose table entry
+declares type `0x01`, FAT12, over a FAT16 filesystem, it reported
+`MISMATCH: declared type 0x01 disagrees with observed filesystem FAT16`,
+the discrepancy the CFReDS page itself warns of. It reported no mismatch
+on `dfr-11`, where the declaration is right. Every image reported two
+filesystems not analysed and coverage incomplete.
+
+**`dfr-01`.** One deleted file on the FAT32 partition, `Bellatrix.txt`,
+712 bytes, first cluster 5. The layout document places it at sectors
+90243 and 90244; cluster 5 is sector 82048 + 8192 + 3 = 90243. Both
+tools recovered the same bytes, and the content names itself:
+
+```text
+6523600836b7e0fdce6713bb28c3d6d70c8f390fd885bac57d4894c3764ca527  Taphonomy
+6523600836b7e0fdce6713bb28c3d6d70c8f390fd885bac57d4894c3764ca527  The Sleuth Kit
+```
+
+**`dfr-02`.** `Bellatrix.txt`, 4,096 bytes, first cluster 6, two
+sectors to the cluster. The layout document places it at 90248–90251
+and 90256–90259, with the live `Canopus.txt` at 90252–90255 between the
+two. Taphonomy reported `run 6-9, 4096 bytes, REFUSED: cluster 8 is in
+use`; cluster 8 is sector 90252, `Canopus.txt`'s first. It wrote
+nothing. The Sleuth Kit recovered 4,096 bytes. Cut from the image:
+
+```text
+ae9351608a8a34c5ac24700001914cec44687b62488d6e869491da020105156b  sectors 90248-90251 and 90256-90259
+ae9351608a8a34c5ac24700001914cec44687b62488d6e869491da020105156b  The Sleuth Kit
+1e28b774a00742d99d1590e1b72d77937f6e2a9cbc0277a3ed2e140ab8168aa3  sectors 90248-90255, the implied run
+```
+
+The implied run's tags name `Bellatrix.txt` and `Canopus.txt`; The
+Sleuth Kit's name only `Bellatrix.txt`.
+
+**`dfr-11`.** The root lists `SAGITT~1` as a deleted directory at
+cluster 5. Taphonomy read it from that cluster alone and found three
+deleted files of 8,192 bytes at clusters 55, 71 and 87, each run free.
+All three sources agree:
+
+| File | Sectors | NIST, cut by `dd` | Taphonomy | The Sleuth Kit |
+| --- | --- | --- | --- | --- |
+| `Rukbat.txt` | 90293–90308 | `145c1752…` | `145c1752…` | `145c1752…` |
+| `Elnasl.txt` | 90309–90324 | `56c8302c…` | `56c8302c…` | `56c8302c…` |
+| `Nunki.txt` | 90325–90340 | `71dbaab9…` | `71dbaab9…` | `71dbaab9…` |
+
+No orphaned directory was reported.
+
+**Reach.** The layout document lists 15 deleted files across the three
+images:
+
+| Image | Deleted | On FAT32 | Taphonomy, FAT32 | The Sleuth Kit, FAT32 |
+| --- | --- | --- | --- | --- |
+| `dfr-01` | 3 | 1 | 1 | 1 |
+| `dfr-02` | 3 | 1 | 0, refused | 1 |
+| `dfr-11` | 9 | 3 | 3 | 3 |
+
+The Sleuth Kit was not run on the FAT12 and FAT16 partitions, so what it
+reaches there is not measured.
+
+**Time.** On the 1 GiB images the release build took 10.63 s on
+`dfr-02` and 9.93 s on `dfr-11`, reading and hashing every byte.
+
+**Two defects observed.** The heading of the deleted directory reads
+`deleted directory /?AGITT~1`, while its own entry in the root reads
+`name SAGITT~1 recovered`: the path is built without the long-name
+association the listing uses. And every name is shown in its 8.3 form
+(`URSA_M~1`, `BETELG~1.TXT`) where The Sleuth Kit shows the long name.
+
+### Conclusion
+
+1. **Every file Taphonomy recovered is the file that was deleted.** Four
+   recoveries across three images each equal the sectors NIST documents,
+   and equal The Sleuth Kit's.
+2. **Its identification is right on evidence it did not make,** including
+   the declared-type discrepancy NIST documents.
+3. **On a file fragmented around a live file, it refuses, and The Sleuth
+   Kit recovers it correctly.** The Sleuth Kit's recovery equals the
+   documented sectors, so it passed over the allocated clusters to reach
+   the second fragment. That rule is an inference too; here the layout
+   rewards it. Taphonomy's refusal is correct by `ADR-0010` Decision C
+   and produces nothing, where the implied run would have produced a
+   file half of which is another, live file.
+4. **It reaches four of the fifteen deleted files.** The other eleven are
+   on FAT12 and FAT16 partitions, which it identifies and does not
+   analyse. Every CFReDS FAT image carries two such partitions.
+
+### Limitations
+
+1. Three images of the seventeen FAT cases. The cases the layout
+   document singles out for FAT, the interleaved fragmentation of
+   DFR-05, DFR-05-BRAID and DFR-05-NEST, were not run; there the gaps in
+   an implied run are free, and neither tool's rule is expected to help.
+2. The Sleuth Kit was run only on the FAT32 partitions, so its reach on
+   FAT12 and FAT16 is not measured here.
+3. The layout document was read in a conversion of the PDF, whose own
+   digest was not recorded. Every sector used here was checked against
+   the image, and every one was right.
+4. Times are single runs.
+
+### External practice
+
+NIST's CFTT project reported, from testing deleted-file-recovery tools
+on these scenarios, that on FAT only a deleted file's first block is
+identified, and that tools guessing the rest often recover files mixed
+from several originals (Lyle, AAFS 2013). The CFReDS page notes that the
+fragmented cases often give interesting results on FAT. `dfr-02` is one
+of them: the mixture is the implied run, which Taphonomy refused.
+
+### Next action
+
+1. Correct the deleted directory's heading to use the name its entry
+   recovers.
+2. Decide the next milestone from this record: FAT12 and FAT16, long
+   names, or the fragmented cases.
