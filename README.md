@@ -1,413 +1,205 @@
 # Taphonomy
 
-Taphonomy is a local-first digital data recovery system written in Rust.
+Taphonomy recovers deleted files, and files whose directories were lost to
+a quick format, from FAT32 disk images. It opens evidence read-only, reports
+what it could not analyse, and refuses a recovery it cannot support rather
+than guessing. It is written in Rust.
 
-The project is designed around evidence preservation, correctness, security, reproducibility, and maintainability.
+Every behaviour below is recorded in a decision record and measured in an
+experiment record in this repository. Where a claim rests on a measurement,
+the measurement is linked.
 
-## Project Status
+## What it does today
 
-Taphonomy has a validated read-only evidence layer, reads every FAT32
-directory the root reaches, finds directories that nothing names, and
-recovers the data of an unfragmented file that is deleted or whose
-directory is orphaned.
-Recovered content is extracted to memory and reported as a SHA-256 digest.
-Where `--output` names a destination, each artifact is also written to a
-file, read back from disk, and reported as matching or differing from what
-was read. Where the operator supplies a digest of the file they are looking
-for, the recovered digest is compared against it and the result reported as
-a match or a difference. Every run also states how much of the evidence it
-analysed and what it did not.
+* Opens a raw disk image read-only and hashes every byte with SHA-256 before
+  reporting anything.
+* Parses the MBR partition table and validates every declared extent
+  against the image's true size. GPT is detected and reported as
+  unsupported.
+* Identifies each partition's filesystem from its structure rather than its
+  label: FAT12, FAT16 and FAT32 by cluster count, exFAT and NTFS by
+  signature. A partition type that disagrees with the filesystem on it is
+  reported as a finding.
+* Reads every FAT32 directory the root reaches: a live one along its
+  cluster chain, a deleted one from its first cluster
+  ([ADR-0016](docs/decisions/ADR-0016-m11-subdirectory-traversal-decisions.md)).
+* Finds directories that nothing names, such as the tree a quick format
+  leaves behind, and offers the files they list for recovery
+  ([ADR-0017](docs/decisions/ADR-0017-m12-orphaned-directory-decisions.md),
+  [EXP-0007](docs/development/EXPERIMENTS.md)).
+* Recovers an unfragmented file whose clusters are all free, and refuses
+  one whose implied run reaches a cluster in use, naming the cluster
+  ([ADR-0010](docs/decisions/ADR-0010-m7-implementation-decisions.md)).
+* Writes each recovered file, reads it back and reports whether what landed
+  matches what was read
+  ([ADR-0015](docs/decisions/ADR-0015-m10-recovery-output-decisions.md)).
+* Compares a recovery against a digest you supply, and never looks one up
+  ([ADR-0013](docs/decisions/ADR-0013-m8-reference-validation-decisions.md)).
+* States its own coverage: every partition, directory or listing it did not
+  analyse is counted and named
+  ([ADR-0014](docs/decisions/ADR-0014-m9-classification-decisions.md)).
 
-Milestones M1 to M9 of ADR-0002 §8 are complete, which is the whole of that
-sequence. M10 has since added the output path, M11 the reading of every
-directory the root reaches, and M12 the search for directories no read
-entry names (ADR-0017). Evidence images are
-opened read-only and hashed, MBR partition tables are parsed with every
-declared extent validated against the true evidence size, GPT is detected
-and reported as unsupported, filesystems are identified from volume
-structure, FAT32 boot sectors are parsed and validated against the
-partition extent they occupy, the root directory is enumerated by walking
-its cluster chain, the deleted entries within it are identified, the
-content of an eligible deleted file is read and hashed, and that digest is
-compared against a reference the operator supplies, and the run reports
-what it recovered, what it could not, and how much of the evidence it
-reached.
+## Evidence that it works
 
-A deleted entry is reported with whatever fields deletion left intact.
-Where a long-name entry survives alongside it, the first character of its
-short name is recovered from the checksum that entry carries, which
-determines the destroyed byte rather than narrowing it. Where none
-survives, that is reported rather than guessed.
+[EXP-0008](docs/development/EXPERIMENTS.md) ran Taphonomy against three of
+NIST's [CFReDS](https://cfreds-archive.nist.gov/dfr-test-images.html)
+deleted-file-recovery test images and against The Sleuth Kit 4.12.1. NIST
+documents the sectors every deleted file occupied, so each recovery was
+checked against the image itself rather than against either tool.
 
-Deletion zeroes the cluster chain in every FAT, so nothing in the evidence
-says a deleted file was unfragmented. Taphonomy computes the run the entry
-implies, reads every cluster of that run in the active FAT, and refuses the
-recovery where any of them is in use, naming the cluster that caused the
-refusal. A run of free clusters means only that nothing has claimed those
-clusters since the entry lost them, which is not evidence that the content
-there is the file's, and the tool says so rather than leaving it to be
-inferred.
-Reading the content requires `--recover`.
+| Image | Case | Taphonomy | The Sleuth Kit |
+| --- | --- | --- | --- |
+| `dfr-01-fat` | one unfragmented file | recovered; equals NIST's sectors | identical bytes |
+| `dfr-02-fat` | a file fragmented around a live file | **refused**: the implied run crosses the live file | recovered correctly |
+| `dfr-11-fat` | a deleted directory of three files | all three recovered; each equals NIST's sectors | identical bytes |
 
-A digest on its own says only what was read. Comparing it against a
-reference the operator holds is the only evidence available that the run
-read was the file's clusters, and it is evidence about that one recovery
-rather than about the assumption in general. Where the content is not
-distinctive, a match establishes less than it appears to, and the tool says
-so. Where the digests differ, the four conditions that could have caused it
-are listed and none is chosen. The tool never looks a reference up: it
-compares against what it was given, and reports that nothing was validated
-when it was given nothing. See
-`docs/decisions/ADR-0013-m8-reference-validation-decisions.md`.
+Every file Taphonomy recovered is the file that was deleted. On `dfr-02`
+the run its entry implies is half another, still-existing file; Taphonomy
+refused it where The Sleuth Kit's rule for passing over allocated clusters
+happened to reach the right one. Across the three images Taphonomy reached
+four of the fifteen deleted files: the other eleven sit on the FAT12 and
+FAT16 partitions each image carries, which it identifies and does not yet
+analyse.
 
-A run states its own coverage. A directory that could not be read, a deleted
-directory whose listing may continue beyond the one cluster the evidence
-locates, a partition whose filesystem is not FAT32, a boot sector refused:
-each is counted, named, and reported, and the run is described as having
-covered the evidence completely, incompletely, or not at all. Coverage is
-about reach and not about correctness. A run can cover everything it could
-reach and still recover, for a fragmented deleted file, content that is not
-that file's. Every artifact carries one confidence level, `RECONSTRUCTED`,
-and a digest match is reported beside it rather than raising it. See
-`docs/decisions/ADR-0014-m9-classification-decisions.md`.
+## Quick start
 
-A quick format rewrites the boot sector, the FATs and the root and leaves
-every directory below the root in place, named by nothing. After the walk,
-Taphonomy searches every cluster it did not reach for a directory whose
-first entry names that cluster and whose FAT entry is free, reads each one
-found, and offers the files it lists for recovery under the same checks as
-a deleted file's. EXP-0007 measured what a format leaves; one write after
-it puts a new tree on the same clusters, and then no directory record of
-the old files survives. See
-`docs/decisions/ADR-0017-m12-orphaned-directory-decisions.md`.
+Taphonomy is developed on Ubuntu 24.04 under WSL2. The toolchain is pinned
+in `rust-toolchain.toml`, so [rustup](https://rustup.rs) installs the right
+one on first build. The test fixtures are built from ordinary filesystem
+tools:
 
-The initial development sequence is:
+```sh
+sudo apt install fdisk gdisk dosfstools mtools
+git clone https://github.com/bilalmughal1/taphonomy
+cd taphonomy
+cargo build --release
+./scripts/generate-fixtures.sh
+./target/release/taphonomy fixtures/partition/fat32-formatted-tree.img --recover
+```
 
-1. ~~Establish project, safety, security, and architecture contracts.~~ Done.
-2. ~~Build a read-only evidence abstraction.~~ Done.
-3. ~~Build a synthetic evidence laboratory.~~ Done.
-4. ~~Implement one narrowly defined recovery capability.~~ Done.
-5. Validate recovery accuracy, including false positives.
-6. Add regression, property, integration, and fuzz testing where appropriate.
-7. Expand recovery capabilities based on research and measured results.
+That fixture is a card whose `DCIM/100TAPH` folder was lost to a quick
+format. Part of what the run reports:
 
-Item 5 is not complete, though the failure that matters most is now
-measured. A deleted file that was fragmented, whose clusters have since
-been freed, produces a run that passes the allocation check and a digest
-that is plausible and wrong. Two fixtures now measure that space, both
-built from ordinary file operations rather than by editing an image. On
-the first, three of five deleted entries recover content that is not their
-own file's while the tool reports all five identically. On the second a
-live file still holds a cluster inside the implied run, so the entry is
-refused rather than recovered, which is the arrangement the tool handles
-correctly. That is two arrangements of many. Which of the rest remain
-unmeasured, and which cannot be built with the fixture laboratory as it
-stands, is recorded in `docs/development/KNOWN_ISSUES.md`.
+```text
+    orphaned directory c4, .. names c3
+      c4 s2     file          IMG_0001.JPG  13 bytes, cluster 5
+      c4 s3     file          IMG_0002.JPG  13 bytes, cluster 6
+      c4 s4     file          IMG_0003.JPG  1300 bytes, cluster 7
+      orphaned content
+        c4 s2     run 5-5, 13 bytes, 499 slack, every cluster free
+                  recovered sha256 86a773f90bcf220bea99ad333fdc1476de79daddba2ea7e017de7f302e394417 over 13 bytes
+        ...
 
-EXP-0008 measured the tool against three of NIST's CFReDS deleted-file
-recovery images and The Sleuth Kit 4.12.1. Every file it recovered from
-their FAT32 partitions equals the sectors NIST documents for that file and
-equals The Sleuth Kit's recovery. On a file fragmented around a live file
-it refused, where The Sleuth Kit recovered the file correctly. It reached
-four of the fifteen deleted files: the other eleven are on the FAT12 and
-FAT16 partitions every one of those images carries.
+coverage     complete
+  volumes analysed           1
+artifacts    3 RECONSTRUCTED
 
-## Exit Status
+A free run means nothing has claimed those
+clusters since the entry lost them. It is not
+evidence that the content there is this file's.
+No reference supplied. Nothing was validated.
+```
 
-| Code | Meaning |
+`./scripts/verify-fixtures.sh` builds every fixture twice and confirms they
+are byte-identical; `cargo test --workspace --no-fail-fast` runs the suite
+against them.
+
+## Usage
+
+```text
+taphonomy <evidence-image> [--recover] [--output <directory>] [--reference-digest <hex>]
+```
+
+| Option | Effect |
+| --- | --- |
+| *(none)* | Report what the evidence states. No file content is read. |
+| `--recover` | Read and hash the content of each eligible file. |
+| `--output <directory>` | Also write each recovered file there, then read it back and verify it. The directory may not hold the evidence. |
+| `--reference-digest <hex>` | Compare each recovery against the SHA-256 of the file you are looking for. Requires `--recover`. |
+
+| Exit status | Meaning |
 | --- | --- |
 | 0 | The evidence was analysed, completely or in part |
 | 1 | The evidence could not be opened or hashed |
 | 2 | An argument error; no evidence was opened |
 | 3 | Nothing past the evidence digest was analysed |
 
-A gap in coverage does not by itself change the status. A volume holding a
-deleted directory whose listing may continue, or one the run declined to
-read, is analysed in part and exits 0, and the gap is reported on standard
-output. A digest that differs from the reference is a finding about the
-evidence and also exits 0.
-
----
-
-## Initial Recovery Scope
-
-The first recovery path is intended to target:
-
-* disk-image evidence
-* RAW/DD images
-* FAT32
-* deleted controlled-test files
-* read-only evidence access
-* deterministic recovery output
-
-The initial filesystem target is FAT32, not NTFS; see
-`docs/decisions/ADR-0002-initial-filesystem-target.md`. The implementation
-order is FAT32, then exFAT, then NTFS.
-
-Physical-device recovery is outside the initial implementation scope.
-
-## Design Priorities
-
-Taphonomy prioritizes:
-
-* evidence preservation
-* correctness
-* security
-* reproducibility
-* deterministic behavior
-* maintainability
-
-Performance and feature breadth come after correctness and validation.
-
-## Architecture
-
-The initial dependency direction is:
-
-```text
-CLI
- ↓
-Application
- ↓
-Domain
- ↓
-Infrastructure
-```
-
-The CLI is an interface to the application layer. Recovery logic must remain independent of CLI parsing and presentation.
-
-Infrastructure is responsible for controlled interaction with evidence and other system resources.
-
-The architecture is intentionally kept small while the first recovery path is being validated.
-
-As implemented, the separation is between the CLI binary and the library
-crate. The library is not yet subdivided into the layers above; that
-subdivision will be introduced when a capability requires it, not in
-advance.
-
-## Evidence Model
-
-Taphonomy distinguishes between:
-
-```text
-Source Evidence
-      ↓
-Working Evidence
-      ↓
-Analysis
-      ↓
-Recovery Output
-```
-
-Source evidence must remain unmodified.
-
-Development and testing use controlled evidence such as synthetic disk images, generated files, corrupted fixtures, disposable virtual disks, and known-good reference artifacts.
-
-Real personal recovery evidence must not be committed to the repository.
-
-## Safety
-
-Taphonomy treats recovery evidence as potentially valuable and untrusted input.
-
-Normal development must not:
-
-* modify source evidence
-* write recovered output to source evidence
-* format or repartition source devices
-* perform destructive filesystem operations
-* transmit evidence to external services
-* assume that a device path identifies the same physical device throughout an operation
-
-Operations involving ambiguous or potentially destructive evidence access must fail explicitly rather than guessing.
-
-See [docs/SAFETY.md](docs/SAFETY.md) for the detailed safety model.
-
-## Security
-
-Recovery evidence is treated as untrusted input.
-
-The implementation must account for risks including:
-
-* out-of-bounds reads
-* integer overflow and underflow
-* malformed filesystem metadata
-* malicious filenames
-* path traversal
-* excessive memory allocation
-* recursion exhaustion
-* CPU exhaustion
-* malicious compressed data
-* symbolic-link attacks
-
-See [SECURITY.md](SECURITY.md) for the security requirements.
-
-## Development Environment
-
-The initial development environment is:
-
-* Rust 1.98.0
-* Rustfmt
-* Clippy
-* Linux userspace under WSL2
-* Windows host environment
-
-Platform-specific behavior must be validated separately where WSL2 differs from native Linux hardware access.
-
-## Testing Philosophy
-
-Recovery functionality must be tested against controlled evidence.
-
-Testing should verify both:
-
-* successful recovery
-* incorrect recovery and false positives
-
-A recovery result that appears plausible but is incorrect is considered a failure.
-
-Depending on the capability, testing may include:
-
-* unit tests
-* component tests
-* integration tests
-* filesystem fixture tests
-* end-to-end tests
-* property-based tests
-* fuzz tests
-* regression tests
-
-Recovery experiments should record enough information to reproduce their results.
-
-## Research
-
-Recovery algorithms should be based on documented filesystem and storage behavior rather than assumptions.
-
-Research may include established recovery software and filesystem implementations, including:
-
-* TestDisk
-* PhotoRec
-* The Sleuth Kit
-* Autopsy
-* Foremost
-* Scalpel
-* filesystem-specific open-source implementations
-
-Third-party software is used as a research reference unless its implementation is independently evaluated for licensing, security, correctness, and compatibility.
-
-Material research findings are recorded in:
-
-```text
-docs/development/RESEARCH_LOG.md
-```
-
-## Experiments
-
-Controlled experiments are recorded in:
-
-```text
-docs/development/EXPERIMENTS.md
-```
-
-Experiments should document:
-
-* question
-* hypothesis
-* input
-* method
-* expected result
-* actual result
-* conclusion
-* next action
-
-Experiments must use controlled evidence.
-
-## Documentation
-
-Important project contracts are maintained in:
-
-```text
-docs/PROJECT.md
-docs/SAFETY.md
-SECURITY.md
-docs/ARCHITECTURE.md
-docs/development/RESEARCH_LOG.md
-docs/development/EXPERIMENTS.md
-```
-
-Architecture decisions that materially affect the system are recorded as Architecture Decision Records under:
-
-```text
-docs/decisions/
-```
-
-## Current Limitations
-
-At this stage:
-
-* a recovered artifact is written whole at the size its entry declared, so
-  nothing about the file tells an operator whether the content is the
-  file's; only a reference digest can establish that
-* only FAT32 is parsed beyond the partition table; FAT12 and FAT16 are
-  identified and not analysed, and exFAT and NTFS are identified and
-  reported as unsupported
-* a deleted directory is read from its first cluster alone: its chain is
-  zeroed, so no later cluster of it can be located, and a listing that may
-  have continued past that cluster is reported as a gap
-* the walk reads no cluster twice and stops 128 levels below the root; each
-  is reported as a gap, and a directory below one of those bounds hides
-  everything named inside it that the orphan search does not find
-* a directory nothing names is found only where its first cluster still
-  names itself and the FAT marks it free; on a volume written to after a
-  format no such cluster survives
-* only an unfragmented deleted file is recovered; a run reaching an
-  allocated cluster is refused rather than reconstructed
-* recovered content is compared only against a reference the operator
-  supplies; the tool never discovers one
-* one confidence level is reachable, so every artifact carries the same one
-  and a reference match does not raise it
-* no long name is assembled, for a live entry or a deleted one; every name
-  is shown in its 8.3 form, and a deleted entry's first character is
-  recovered only where a long-name entry survives to determine it
-* only MBR partition tables are parsed; GPT is detected but not parsed
-* only 512-byte sectors are supported
-* physical-device recovery is not supported
-* recovery accuracy is measured on the FAT32 partitions of three NIST
-  CFReDS images and nowhere else (EXP-0008); it is not established in
-  general
-* production recovery workflows have not been established
-* release-build performance is measured in single runs only: it read and
-  analysed each 1 GiB CFReDS image in about ten seconds (EXP-0008)
-
-These limitations will change only when implementation and validation provide evidence for doing so.
+A gap in coverage does not by itself change the status: it is reported on
+standard output. A digest that differs from the reference is a finding
+about the evidence and also exits 0.
+
+## Scope and limitations
+
+Taphonomy is early, and deliberately narrow.
+
+* Only FAT32 is analysed. FAT12 and FAT16 are identified and not read;
+  exFAT and NTFS are identified and reported as unsupported.
+* It reads disk images, not physical devices, and only MBR partition
+  tables with 512-byte sectors.
+* Recovery assumes a file's clusters were contiguous. Deletion erases the
+  cluster chain, so for a fragmented file whose clusters have since been
+  freed, the run its entry implies can hold content that is not the file's.
+  Taphonomy cannot detect that case, and every recovery carries a caveat
+  saying so. Only a reference digest establishes that content is the
+  file's.
+* A deleted directory is read from its first cluster only; a listing that
+  may continue past it is reported as a gap.
+* A directory nothing names is found only while its first cluster still
+  identifies itself. On a card written to after a format, none does.
+* Long file names are not assembled: every name is shown in its 8.3 form.
+
+The full list, each with the measurement behind it, is in
+[KNOWN_ISSUES.md](docs/development/KNOWN_ISSUES.md).
+
+## How it is built
+
+A recovery result that appears plausible but is incorrect is treated as a
+failure, not a partial success. The project is organised around that.
+
+* **Decisions before code.** Every capability starts as an Architecture
+  Decision Record in [docs/decisions](docs/decisions), stating what will be
+  built, what will not, and the measured conditions it must meet.
+* **Measurements before decisions.** Experiments in
+  [EXPERIMENTS.md](docs/development/EXPERIMENTS.md) record a hypothesis
+  before the measurement, the method, and the result, including the
+  predictions that were wrong.
+* **Reproducible evidence.** Every test image is generated from ordinary
+  filesystem tools by `scripts/generate-fixtures.sh`, byte-identical on
+  every build, with its digest committed in
+  `fixtures/partition/MANIFEST.sha256`. No real personal evidence is ever
+  committed.
+* **Tested boundaries.** Read-only access, bounds checks on what is
+  parsed, each refusal, and every kind of coverage gap have tests.
+
+Evidence preservation, correctness, security and reproducibility come
+first; performance and breadth come after. The project's contracts are in
+[PROJECT.md](docs/PROJECT.md), [ARCHITECTURE.md](docs/ARCHITECTURE.md),
+[SAFETY.md](docs/SAFETY.md) and [SECURITY.md](SECURITY.md); the build
+environment in
+[DEVELOPMENT_ENVIRONMENT.md](docs/development/DEVELOPMENT_ENVIRONMENT.md);
+research in [RESEARCH_LOG.md](docs/development/RESEARCH_LOG.md); changes in
+[CHANGELOG.md](docs/development/CHANGELOG.md).
+
+## Planned
+
+Not yet implemented, in the order the evidence above suggests:
+
+1. FAT12 and FAT16, where eleven of the fifteen deleted files in EXP-0008
+   were out of reach.
+2. Long file names.
+3. exFAT, the filesystem of most cards larger than 32 GB.
+
+Each will get its own decision record, with the measurements it must meet,
+before any code.
 
 ## Contributing
 
-Development follows the engineering and safety requirements documented in `CLAUDE.md` and `CONTRIBUTING.md`.
-
-Changes should be focused, tested, documented where required, and reviewed before committing.
+External code contributions are not accepted; see
+[CONTRIBUTING.md](CONTRIBUTING.md) for why.
 
 ## License
 
 Copyright (c) 2026 Fahad Bilal Saleem.
 
 Taphonomy is distributed under the GNU General Public License, version 3 or
-later. See `LICENSE`.
-
-## Status Terminology
-
-Project documentation distinguishes between:
-
-* **Implemented**: code exists for the described behavior.
-* **Tested**: automated or controlled tests have been run.
-* **Experimentally validated**: controlled evidence supports the behavior.
-* **Partially supported**: only a defined subset has been implemented or validated.
-* **Untested**: implementation exists but relevant validation has not been performed.
-* **Known limitation**: a documented limitation is understood.
-* **Planned**: intended future work that has not been implemented.
-
-Claims about recovery capability should use these terms accurately.
-
-## Repository
-
-Taphonomy is currently under active development.
-
-The immediate goal is to establish a safe, reproducible foundation before implementing recovery functionality.
-
+later. See [LICENSE](LICENSE).
