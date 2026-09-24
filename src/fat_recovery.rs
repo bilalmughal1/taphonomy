@@ -164,6 +164,21 @@ impl fmt::Display for Ineligible {
     }
 }
 
+/// How the directory an entry was read from was reached.
+///
+/// ADR-0017 Decision C. In a listing the walk reached, only a deleted
+/// entry's content is lost. In an orphaned listing, which nothing the run
+/// read names, a live file entry's content is lost too: EXP-0007 measured
+/// that a quick format leaves those entries unmarked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Listing {
+    /// Reached by the walk from the root.
+    Walked,
+
+    /// Found by the orphan search, named by nothing the run read.
+    Orphaned,
+}
+
 /// What a deleted entry's fields imply about its content.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Eligibility {
@@ -181,26 +196,41 @@ enum Eligibility {
 /// reporting it as unrecoverable would be false. This follows `associate`,
 /// which answers the same way for the same reason.
 ///
+/// ADR-0017 Decision C makes one exception: a live short-name file in an
+/// orphaned listing. Its directory is named by nothing, so its content is
+/// lost as a deleted file's is, and it is asked about under the same
+/// conditions. A live directory there is not: Decision B reports it.
+///
 /// Reads no evidence. The answer is a function of the entry and the volume's
 /// geometry, so a wrong answer here is a wrong answer about arithmetic and
 /// not about what is on the disk.
-fn eligibility(entry: &Entry, boot: &Fat32BootSector) -> Option<Eligibility> {
-    let EntryKind::Deleted { was } = &entry.kind else {
-        return None;
-    };
-
+fn eligibility(entry: &Entry, listing: Listing, boot: &Fat32BootSector) -> Option<Eligibility> {
     let refuse = |reason| Some(Eligibility::Refused(reason));
 
-    let (directory, first_cluster, file_size) = match was {
-        DeletedKind::LongName { .. } => return refuse(Ineligible::LongNameComponent),
-        DeletedKind::VolumeLabel { .. } => return refuse(Ineligible::VolumeLabel),
-        DeletedKind::Invalid { attr } => return refuse(Ineligible::InvalidEntry { attr: *attr }),
-        DeletedKind::ShortName {
-            directory,
-            first_cluster,
-            file_size,
-            ..
-        } => (*directory, *first_cluster, *file_size),
+    let (directory, first_cluster, file_size) = match (&entry.kind, listing) {
+        (EntryKind::Deleted { was }, _) => match was {
+            DeletedKind::LongName { .. } => return refuse(Ineligible::LongNameComponent),
+            DeletedKind::VolumeLabel { .. } => return refuse(Ineligible::VolumeLabel),
+            DeletedKind::Invalid { attr } => {
+                return refuse(Ineligible::InvalidEntry { attr: *attr });
+            }
+            DeletedKind::ShortName {
+                directory,
+                first_cluster,
+                file_size,
+                ..
+            } => (*directory, *first_cluster, *file_size),
+        },
+        (
+            EntryKind::ShortName {
+                directory: false,
+                first_cluster,
+                file_size,
+                ..
+            },
+            Listing::Orphaned,
+        ) => (false, *first_cluster, *file_size),
+        _ => return None,
     };
 
     if directory {
@@ -393,7 +423,21 @@ pub fn assess<R: EvidenceReader>(
     extent: VolumeExtent,
     reader: &mut R,
 ) -> Result<Option<Assessment>, RecoveryError> {
-    let run = match eligibility(entry, boot) {
+    assess_listed(entry, Listing::Walked, boot, extent, reader)
+}
+
+/// [`assess`], for an entry read from a listing reached as `listing` says.
+///
+/// ADR-0017 Decision C. The run is inferred and checked exactly as it is
+/// for a deleted entry; only which entries are asked about differs.
+pub fn assess_listed<R: EvidenceReader>(
+    entry: &Entry,
+    listing: Listing,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    reader: &mut R,
+) -> Result<Option<Assessment>, RecoveryError> {
+    let run = match eligibility(entry, listing, boot) {
         None => return Ok(None),
         Some(Eligibility::Refused(reason)) => return Ok(Some(Assessment::Ineligible(reason))),
         Some(Eligibility::Run(run)) => run,
@@ -903,14 +947,14 @@ mod tests {
     }
 
     fn run_of(entry: &Entry) -> ClusterRun {
-        match eligibility(entry, &boot()) {
+        match eligibility(entry, Listing::Walked, &boot()) {
             Some(Eligibility::Run(run)) => run,
             other => panic!("expected a run, got {other:?}"),
         }
     }
 
     fn refusal_of(entry: &Entry) -> Ineligible {
-        match eligibility(entry, &boot()) {
+        match eligibility(entry, Listing::Walked, &boot()) {
             Some(Eligibility::Refused(reason)) => reason,
             other => panic!("expected a refusal, got {other:?}"),
         }
@@ -952,7 +996,59 @@ mod tests {
             },
         };
 
-        assert_eq!(eligibility(&live, &boot()), None);
+        assert_eq!(eligibility(&live, Listing::Walked, &boot()), None);
+    }
+
+    /// ADR-0017 Decision C. In an orphaned listing a live file is asked
+    /// about under a deleted file's conditions, including their refusals,
+    /// and a live directory is still not asked about. The same live file in
+    /// a walked listing is not asked about at all.
+    #[test]
+    fn an_orphaned_listing_offers_its_live_files() {
+        let live = |directory, file_size| Entry {
+            cluster: 4,
+            slot: 2,
+            kind: EntryKind::ShortName {
+                name: Some("IMG_0001.JPG".to_string()),
+                raw_name: *b"IMG_0001JPG",
+                directory,
+                first_cluster: 5,
+                file_size,
+                nt_res: 0,
+            },
+        };
+
+        match eligibility(&live(false, 13), Listing::Orphaned, &boot()) {
+            Some(Eligibility::Run(run)) => {
+                assert_eq!(run.first_cluster, 5);
+                assert_eq!(run.cluster_count, 1);
+                assert_eq!(run.file_size, 13);
+            }
+            other => panic!("expected a run, got {other:?}"),
+        }
+        assert_eq!(
+            eligibility(&live(false, 0), Listing::Orphaned, &boot()),
+            Some(Eligibility::Refused(Ineligible::EmptyFile))
+        );
+        assert_eq!(
+            eligibility(&live(true, 0), Listing::Orphaned, &boot()),
+            None
+        );
+        assert_eq!(
+            eligibility(&live(false, 13), Listing::Walked, &boot()),
+            None
+        );
+    }
+
+    /// ADR-0017 Decision C. A deleted entry is asked about the same way
+    /// whichever listing it was read from.
+    #[test]
+    fn a_deleted_file_is_asked_about_in_either_listing() {
+        let entry = deleted_file(4, 30);
+        assert_eq!(
+            eligibility(&entry, Listing::Orphaned, &boot()),
+            eligibility(&entry, Listing::Walked, &boot())
+        );
     }
 
     #[test]
@@ -963,7 +1059,7 @@ mod tests {
             kind: EntryKind::Terminator,
         };
 
-        assert_eq!(eligibility(&entry, &boot()), None);
+        assert_eq!(eligibility(&entry, Listing::Walked, &boot()), None);
     }
 
     #[test]

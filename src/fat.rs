@@ -79,6 +79,16 @@ impl FatGeometry {
             + (self.fat_count as u32 * self.fat_size)
             + self.root_dir_sectors
     }
+
+    /// Every data cluster the volume declares, from the first to the last.
+    ///
+    /// For a caller outside this crate that visits each cluster, which
+    /// would otherwise restate `FIRST_DATA_CLUSTER`. Saturating, so a
+    /// declared count near the 32-bit maximum shortens the range rather
+    /// than wrapping it.
+    pub const fn data_clusters(&self) -> std::ops::Range<u32> {
+        FIRST_DATA_CLUSTER..FIRST_DATA_CLUSTER.saturating_add(self.cluster_count)
+    }
 }
 
 pub(crate) fn identify_fat(
@@ -291,6 +301,24 @@ pub(crate) mod tests {
         );
         assert_eq!(g.bytes_per_sector, 512);
         assert_eq!(g.fat_count, 2);
+    }
+
+    /// `ADR-0017` Decision A visits every data cluster, and only those.
+    #[test]
+    fn data_clusters_span_every_declared_cluster() {
+        let Identification::Identified { geometry, .. } = identify(&fat32_sector()) else {
+            panic!("expected identification");
+        };
+        let g = geometry.expect("FAT geometry");
+
+        assert_eq!(g.data_clusters().start, FIRST_DATA_CLUSTER);
+        assert_eq!(g.data_clusters().len(), g.cluster_count as usize);
+
+        let wide = FatGeometry {
+            cluster_count: u32::MAX,
+            ..g
+        };
+        assert_eq!(wide.data_clusters().end, u32::MAX);
     }
 
     /// The FAT specification forbids using the type string to determine

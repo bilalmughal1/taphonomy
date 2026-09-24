@@ -240,15 +240,18 @@ fn a_reference_is_counted_against_every_extraction() {
     );
 }
 
-/// `ADR-0016` Decisions A and D, and section 11 condition 3. A deleted
-/// directory is read as far as its first cluster and no further.
+/// `ADR-0016` Decisions A and D, and section 11 condition 3 as `ADR-0017`
+/// section 9 revises it. A deleted directory is read as far as its first
+/// cluster and no further.
 ///
 /// In `fat32-deleted-split-directory.img` that cluster holds no terminator,
 /// so the listing may continue; the cluster it continued into, 20, is
-/// reachable from nothing, and with it `TAIL` at 19 and `OMEGA.TXT` at 21.
-/// Cluster 4 is `PAYLOAD.BIN`'s data, and EXP-0005 finding 6 measured what
-/// reading it as the continuation would produce: entries that look live and
-/// name clusters far beyond the volume.
+/// reachable from nothing. `TAIL` at 19 is found by the orphan search
+/// instead, which `tests/orphaned_directories.rs` asserts; 21 is
+/// `OMEGA.TXT`'s data and is never read as a directory. Cluster 4 is
+/// `PAYLOAD.BIN`'s data, and EXP-0005 finding 6 measured what reading it as
+/// the continuation would produce: entries that look live and name clusters
+/// far beyond the volume.
 #[test]
 fn a_deleted_directory_is_read_no_further_than_its_first_cluster() {
     let output = run(&[&fixture("fat32-deleted-split-directory.img")]);
@@ -261,7 +264,7 @@ fn a_deleted_directory_is_read_no_further_than_its_first_cluster() {
         text.contains("listing may continue: cluster 3 holds no terminator"),
         "{text}"
     );
-    for unreached in ["c4 s", "c19 s", "c20 s", "c21 s"] {
+    for unreached in ["c4 s", "c20 s", "c21 s"] {
         assert!(!text.contains(unreached), "read {unreached} from: {text}");
     }
 

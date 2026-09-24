@@ -20,9 +20,12 @@ use taphonomy::Sha256Digest;
 use taphonomy::confidence::Confidence;
 use taphonomy::fat_directory::{
     DeletedDirectory, DeletedKind, Directory, Entry, EntryKind, FirstByte, associate,
-    enumerate_deleted_directory, enumerate_directory, enumerate_root, is_dot_entry, recovered_name,
+    begins_directory, enumerate_deleted_directory, enumerate_directory, enumerate_root,
+    is_dot_entry, recovered_name,
 };
-use taphonomy::fat_recovery::{Assessment, Destination, Ineligible, Output, assess, extract};
+use taphonomy::fat_recovery::{
+    Assessment, Destination, Ineligible, Listing, Output, assess_listed, extract,
+};
 use taphonomy::fat32::{Fat32BootSector, parse_boot_sector};
 use taphonomy::filesystem::{
     Filesystem, Identification, VBR_SIZE, VolumeExtent, declared_type_matches, identify,
@@ -472,12 +475,33 @@ fn report_root_directory(
     let mut seen: HashSet<u32> = root.clusters.iter().copied().collect();
     let mut pending: VecDeque<Pending> = VecDeque::new();
 
+    // `ADR-0017` Decision A. Every first cluster the walk was given, read or
+    // declined, so the search never reverses one of its refusals.
+    let mut named: HashSet<u32> = HashSet::new();
+
     print_directory("root directory", &root);
     queue_subdirectories(&root, "", 0, &mut pending);
-    report_recovery(evidence, boot, extent, &root.entries, options, counts);
-    report_recovery(evidence, boot, extent, &root.residue, options, counts);
+    report_recovery(
+        evidence,
+        boot,
+        extent,
+        &root.entries,
+        Listing::Walked,
+        options,
+        counts,
+    );
+    report_recovery(
+        evidence,
+        boot,
+        extent,
+        &root.residue,
+        Listing::Walked,
+        options,
+        counts,
+    );
 
     while let Some(next) = pending.pop_front() {
+        named.insert(next.first_cluster);
         report_subdirectory(
             evidence,
             boot,
@@ -488,6 +512,130 @@ fn report_root_directory(
             options,
             counts,
         );
+    }
+
+    search_orphaned_directories(evidence, boot, extent, &mut seen, &named, options, counts);
+}
+
+/// Searches every data cluster the walk did not name for a directory, and
+/// reads and reports each one found.
+///
+/// `ADR-0017` Decisions A, B and D. A cluster is read only if it begins with
+/// `.` naming itself and `..`, and then only under `ADR-0016` Decision C, so
+/// a cluster the FAT marks in use is passed over. Each directory found is
+/// reported on its own and never followed: every directory the search can
+/// find carries its own signature, so the search visits it whatever names
+/// it. A directory an orphaned listing names and the run never read is a
+/// gap, checked once the search has visited every cluster.
+fn search_orphaned_directories(
+    evidence: &mut EvidenceFile,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    seen: &mut HashSet<u32>,
+    named: &HashSet<u32>,
+    options: Options<'_>,
+    counts: &mut RunCounts,
+) {
+    // Directories the orphaned listings name: the cluster of the listing
+    // that holds the entry, the name, and the first cluster it gives.
+    let mut listed: Vec<(u32, String, u32)> = Vec::new();
+
+    for cluster in boot.geometry.data_clusters() {
+        if seen.contains(&cluster) || named.contains(&cluster) {
+            continue;
+        }
+
+        let read = match begins_directory(evidence, boot, extent, cluster) {
+            Ok(false) => continue,
+            Ok(true) => enumerate_deleted_directory(evidence, boot, extent, cluster),
+            Err(e) => Err(e),
+        };
+
+        let (directory, may_continue) = match read {
+            Ok(DeletedDirectory::Read {
+                listing,
+                may_continue,
+            }) => (listing, may_continue),
+            // Decision C refused what the first test passed: in use, most
+            // likely. It is not a directory the run was given, so not a gap.
+            Ok(DeletedDirectory::Refused(_)) => continue,
+            Err(e) => {
+                // `ADR-0017` Decision D. The clusters after this one were
+                // never visited, so nothing about them can be stated.
+                println!("    ORPHAN SEARCH STOPPED at cluster {cluster}: {e}");
+                counts.orphan_search_stopped += 1;
+                return;
+            }
+        };
+
+        seen.insert(cluster);
+
+        let parent = match directory.entries.get(1).map(|e| &e.kind) {
+            Some(EntryKind::ShortName { first_cluster, .. }) => first_cluster.to_string(),
+            _ => "?".to_string(),
+        };
+        print_directory(
+            &format!("orphaned directory c{cluster}, .. names c{parent}"),
+            &directory,
+        );
+
+        if may_continue {
+            println!("      listing may continue: cluster {cluster} holds no terminator");
+            counts.listings_may_continue += 1;
+        }
+
+        for entry in directory.entries.iter().chain(directory.residue.iter()) {
+            if is_dot_entry(&entry.kind) {
+                continue;
+            }
+            let (first_cluster, name) = match &entry.kind {
+                EntryKind::ShortName {
+                    name,
+                    directory: true,
+                    first_cluster,
+                    ..
+                } => (*first_cluster, name.clone()),
+                EntryKind::Deleted {
+                    was:
+                        DeletedKind::ShortName {
+                            surviving_name,
+                            directory: true,
+                            first_cluster,
+                            ..
+                        },
+                } => (*first_cluster, recovered_name(b'?', surviving_name)),
+                _ => continue,
+            };
+            let name = name.unwrap_or_else(|| format!("c{first_cluster}"));
+            listed.push((cluster, name, first_cluster));
+        }
+
+        report_recovery(
+            evidence,
+            boot,
+            extent,
+            &directory.entries,
+            Listing::Orphaned,
+            options,
+            counts,
+        );
+        report_recovery(
+            evidence,
+            boot,
+            extent,
+            &directory.residue,
+            Listing::Orphaned,
+            options,
+            counts,
+        );
+    }
+
+    for (holder, name, first_cluster) in listed {
+        if !seen.contains(&first_cluster) {
+            println!("    directory {name}, listed in orphaned directory c{holder}");
+            println!("      NOT READ: cluster {first_cluster} was not found by the search");
+            counts.directories_unread += 1;
+        }
     }
 }
 
@@ -656,8 +804,24 @@ fn report_subdirectory(
     }
 
     queue_subdirectories(&directory, &next.path, next.depth, pending);
-    report_recovery(evidence, boot, extent, &directory.entries, options, counts);
-    report_recovery(evidence, boot, extent, &directory.residue, options, counts);
+    report_recovery(
+        evidence,
+        boot,
+        extent,
+        &directory.entries,
+        Listing::Walked,
+        options,
+        counts,
+    );
+    report_recovery(
+        evidence,
+        boot,
+        extent,
+        &directory.residue,
+        Listing::Walked,
+        options,
+        counts,
+    );
 }
 
 /// Prints a directory's statistics, entries, residue and observations.
@@ -746,6 +910,10 @@ struct RunCounts {
     /// say. `ADR-0016` Decision D.
     listings_may_continue: usize,
 
+    /// A volume whose orphan search an evidence error stopped, so the
+    /// clusters after it were never visited. `ADR-0017` Decision D.
+    orphan_search_stopped: usize,
+
     /// A deleted entry whose assessment failed.
     not_assessed: usize,
 
@@ -783,10 +951,10 @@ impl RunCounts {
     /// Everything the run did not analyse, counted once per occurrence.
     ///
     /// The eleven kinds `ADR-0014` Appendix B.4 enumerates, the twelfth
-    /// `ADR-0015` section 9 adds, and the thirteenth `ADR-0016` Decision D
-    /// adds. Three of them no fixture reaches
-    /// and one no fixture can, which is why the derivation below is unit
-    /// tested rather than measured alone.
+    /// `ADR-0015` section 9 adds, the thirteenth `ADR-0016` Decision D adds,
+    /// and the fourteenth `ADR-0017` Decision D adds. Four of them no
+    /// fixture reaches and one no fixture can, which is why the derivation
+    /// below is unit tested rather than measured alone.
     const fn gaps(&self) -> usize {
         self.table_unread
             + self.table_rejected
@@ -801,6 +969,7 @@ impl RunCounts {
             + self.not_delivered
             + self.directories_unread
             + self.listings_may_continue
+            + self.orphan_search_stopped
     }
 
     /// How much of the evidence the run covered.
@@ -897,14 +1066,21 @@ fn report_recovery(
     boot: &Fat32BootSector,
     extent: VolumeExtent,
     entries: &[Entry],
+    listing: Listing,
     options: Options<'_>,
     counts: &mut RunCounts,
 ) {
     let mut heading = false;
 
+    // `ADR-0017` Decision C. An orphaned listing's files are not deleted,
+    // so their block is not headed as though they were.
+    let title = match listing {
+        Listing::Walked => "deleted content",
+        Listing::Orphaned => "orphaned content",
+    };
     let head = |heading: &mut bool| {
         if !*heading {
-            println!("      deleted content");
+            println!("      {title}");
             *heading = true;
         }
     };
@@ -912,7 +1088,7 @@ fn report_recovery(
     for entry in entries {
         let position = format!("c{} s{}", entry.cluster, entry.slot);
 
-        let assessment = match assess(entry, boot, extent, evidence) {
+        let assessment = match assess_listed(entry, listing, boot, extent, evidence) {
             Ok(None) => continue,
             Ok(Some(assessment)) => assessment,
             Err(e) => {
@@ -1128,6 +1304,7 @@ fn print_summary(counts: &RunCounts, options: Options<'_>) {
     print_gap("artifacts not written", counts.not_delivered);
     print_gap("directories not read", counts.directories_unread);
     print_gap("listings that may continue", counts.listings_may_continue);
+    print_gap("orphan searches stopped", counts.orphan_search_stopped);
 
     // Only `--recover` produces an artifact, so without it the line would
     // report a zero that the invocation already determined.
@@ -1456,10 +1633,10 @@ mod tests {
     #[test]
     fn every_kind_of_gap_is_counted_as_one() {
         // The eleven kinds of Appendix B.4, the twelfth `ADR-0015` section 9
-        // adds and the thirteenth `ADR-0016` Decision D adds. Four are
-        // unreachable from any fixture, so this is the only place they are
-        // exercised.
-        let kinds: [fn(&mut RunCounts); 13] = [
+        // adds, the thirteenth `ADR-0016` Decision D adds and the fourteenth
+        // `ADR-0017` Decision D adds. Five are unreachable from any fixture,
+        // so this is the only place they are exercised.
+        let kinds: [fn(&mut RunCounts); 14] = [
             |counts| counts.table_unread += 1,
             |counts| counts.table_rejected += 1,
             |counts| counts.gpt += 1,
@@ -1473,6 +1650,7 @@ mod tests {
             |counts| counts.not_delivered += 1,
             |counts| counts.directories_unread += 1,
             |counts| counts.listings_may_continue += 1,
+            |counts| counts.orphan_search_stopped += 1,
         ];
 
         for set in kinds {

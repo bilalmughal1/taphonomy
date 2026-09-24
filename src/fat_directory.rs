@@ -947,6 +947,48 @@ pub fn enumerate_deleted_directory<R: EvidenceReader>(
     })
 }
 
+/// Whether a cluster begins with `.` naming itself and then `..`.
+///
+/// ADR-0017 Decision A. The orphan search's first test, on slots 0 and 1
+/// alone, so a free cluster that is not a directory costs one 64-byte read
+/// and is never read whole. It consults no FAT: a cluster that passes is
+/// read by [`enumerate_deleted_directory`], which applies every check of
+/// ADR-0016 Decision C again, the FAT's included.
+pub fn begins_directory<R: EvidenceReader>(
+    reader: &mut R,
+    boot: &Fat32BootSector,
+    extent: VolumeExtent,
+    cluster: u32,
+) -> Result<bool, DirectoryError> {
+    // Checked as `enumerate_deleted_directory` checks it, so the two agree
+    // about which clusters exist.
+    let last_cluster = boot.geometry.cluster_count as u64 + FIRST_DATA_CLUSTER as u64;
+    if (cluster as u64) < FIRST_DATA_CLUSTER as u64 || cluster as u64 >= last_cluster {
+        return Err(DirectoryError::ClusterOutOfRange {
+            cluster,
+            cluster_count: boot.geometry.cluster_count,
+        });
+    }
+
+    let mut raw = [0u8; 2 * ENTRY_BYTES];
+    reader.read_exact_at(cluster_offset(boot, extent, cluster)?, &mut raw)?;
+    let [first, second] = raw.as_chunks::<ENTRY_BYTES>().0 else {
+        unreachable!("64 bytes are two 32-byte slots");
+    };
+
+    let dot = matches!(
+        classify(first),
+        EntryKind::ShortName { raw_name, directory: true, first_cluster, .. }
+            if raw_name == DOT_NAME && first_cluster == cluster
+    );
+    let dot_dot = matches!(
+        classify(second),
+        EntryKind::ShortName { raw_name, directory: true, .. } if raw_name == DOT_DOT_NAME
+    );
+
+    Ok(dot && dot_dot)
+}
+
 /// Raw name of the `.` entry.
 const DOT_NAME: [u8; NAME_LEN] = *b".          ";
 
@@ -2136,6 +2178,55 @@ mod tests {
         for cluster in [0, 1, CLUSTER_COUNT + 2] {
             assert!(matches!(
                 enumerate_deleted_directory(&mut image, &boot, extent(), cluster),
+                Err(DirectoryError::ClusterOutOfRange { .. })
+            ));
+        }
+    }
+
+    /// ADR-0017 Decision A. The search's first test passes exactly the
+    /// clusters whose slots Decision C would accept, and reads no FAT: every
+    /// cluster here is marked in use, and Decision C refuses those later.
+    #[test]
+    fn a_cluster_begins_a_directory_only_with_both_dot_entries() {
+        let boot = boot(0);
+        let [dot, dot_dot] = dots(10);
+        let elsewhere = directory_entry(&DOT_NAME, 11);
+        let file_named_dot = entry(&DOT_NAME, ATTR_ARCHIVE);
+
+        let cases: [(&[[u8; ENTRY_BYTES]], bool); 6] = [
+            (&[dot, dot_dot], true),
+            (&[dot, dot_dot, numbered(1)], true),
+            (&[elsewhere, dot_dot], false),
+            (&[file_named_dot, dot_dot], false),
+            (&[dot, numbered(1)], false),
+            (&[], false),
+        ];
+        for (slots, expected) in cases {
+            let mut image = MemoryImage::new(IMAGE_BYTES);
+            image.write_cluster(10, slots);
+            image.write_fat(FAT0_BASE, 10, 0x0FFF_FFF8);
+
+            assert_eq!(
+                begins_directory(&mut image, &boot, extent(), 10).expect("reading"),
+                expected,
+                "slots {slots:?}"
+            );
+        }
+    }
+
+    /// ADR-0017 Decision A. The search visits the first and last data
+    /// clusters, and a cluster outside them is an error, not an offset.
+    #[test]
+    fn the_search_test_is_bounded_by_the_volume() {
+        let boot = boot(0);
+        let mut image = MemoryImage::new(IMAGE_BYTES);
+
+        for cluster in [2, CLUSTER_COUNT + 1] {
+            assert!(!begins_directory(&mut image, &boot, extent(), cluster).expect("reading"));
+        }
+        for cluster in [0, 1, CLUSTER_COUNT + 2] {
+            assert!(matches!(
+                begins_directory(&mut image, &boot, extent(), cluster),
                 Err(DirectoryError::ClusterOutOfRange { .. })
             ));
         }
