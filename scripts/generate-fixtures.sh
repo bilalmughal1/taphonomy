@@ -1213,6 +1213,108 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 26 and 27. FAT32 volumes whose DCF tree was lost to a quick format.
+#
+#     EXP-0007's construction. DCIM takes cluster 3 and DCIM/100TAPH 4, and
+#     the three files 5, 6 and 7 to 9. The volume is then formatted again by
+#     the same mkfs.vfat invocation, which rewrites the boot sector, the FATs
+#     and the root and nothing else. No byte is poked.
+#
+#     IMG_0001.JPG and IMG_0002.JPG hold their own names. IMG_0003.JPG holds
+#     its own name a hundred times, 1,300 bytes, so its run spans three
+#     clusters. EXP-0007 recorded each content's digest.
+#
+#     ADR-0017 section 10, conditions 1 to 3.
+# ---------------------------------------------------------------------------
+build_formatted_tree() {
+    local path="$1" label_id="$2"
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: ${label_id}
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work img i
+    work="$(mktemp -d)"
+    img="${path}@@${VBR_OFFSET}"
+
+    printf 'IMG_0001.JPG\n' > "$work/1"
+    printf 'IMG_0002.JPG\n' > "$work/2"
+    for i in $(seq 100); do
+        printf 'IMG_0003.JPG\n'
+    done > "$work/3"
+
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/DCIM
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/DCIM/100TAPH
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/1" ::/DCIM/100TAPH/IMG_0001.JPG
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/2" ::/DCIM/100TAPH/IMG_0002.JPG
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/3" ::/DCIM/100TAPH/IMG_0003.JPG
+
+    expect_chain "$img" ::/DCIM "::/DCIM <3>"
+    expect_chain "$img" ::/DCIM/100TAPH "::/DCIM/100TAPH <4>"
+    expect_chain "$img" ::/DCIM/100TAPH/IMG_0001.JPG \
+        "::/DCIM/100TAPH/IMG_0001.JPG <5>"
+    expect_chain "$img" ::/DCIM/100TAPH/IMG_0002.JPG \
+        "::/DCIM/100TAPH/IMG_0002.JPG <6>"
+    expect_chain "$img" ::/DCIM/100TAPH/IMG_0003.JPG \
+        "::/DCIM/100TAPH/IMG_0003.JPG <7-9>"
+
+    # The quick format: the same invocation, over the populated volume.
+    mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    rm -rf "$work"
+}
+
+fixture_fat32_formatted_tree() {
+    local path="$OUT_DIR/fat32-formatted-tree.img"
+    printf 'fat32-formatted-tree.img\n'
+
+    build_formatted_tree "$path" 0xfa730012
+
+    note "a DCF tree and three files that no surviving entry names"
+}
+
+# The next shot after the format: the camera recreates the tree on the
+# lowest free clusters, 3 and 4, and writes one new file to 5. EXP-0007
+# measured that the recreated directories are cleared, so nothing names the
+# old IMG_0002.JPG or IMG_0003.JPG, whose bytes survive at 6 and 7 to 9.
+fixture_fat32_formatted_reused() {
+    local path="$OUT_DIR/fat32-formatted-reused.img"
+    printf 'fat32-formatted-reused.img\n'
+
+    build_formatted_tree "$path" 0xfa730013
+
+    local work img
+    work="$(mktemp -d)"
+    img="${path}@@${VBR_OFFSET}"
+
+    printf 'NEW_0001.JPG\n' > "$work/new"
+
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/DCIM
+    MTOOLS_SKIP_CHECK=1 mmd -i "$img" ::/DCIM/100TAPH
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/new" ::/DCIM/100TAPH/IMG_0001.JPG
+
+    expect_chain "$img" ::/DCIM "::/DCIM <3>"
+    expect_chain "$img" ::/DCIM/100TAPH "::/DCIM/100TAPH <4>"
+    expect_chain "$img" ::/DCIM/100TAPH/IMG_0001.JPG \
+        "::/DCIM/100TAPH/IMG_0001.JPG <5>"
+
+    rm -rf "$work"
+
+    note "the same tree recreated over the old one, which nothing now names"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -1241,6 +1343,8 @@ fixture_fat32_deleted_split_directory
 fixture_fat32_nested_directories
 fixture_fat32_directory_loop
 fixture_fat32_slot_collision
+fixture_fat32_formatted_tree
+fixture_fat32_formatted_reused
 
 # ---------------------------------------------------------------------------
 # Manifest
