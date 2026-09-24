@@ -7,6 +7,10 @@ history.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.1.0 - 2026-09-24
+
 ### Added
 
 - Read-only evidence file access with SHA-256 hashing (ADR-0002 M1)
@@ -181,6 +185,11 @@ history.
 - Three fixtures: a quick-formatted DCF tree, the same volume written to
   once more, and a deleted tree deeper than the walk's bound with one dot
   entry broken (EXP-0007; ADR-0017 section 10)
+- Continuous integration: on every push the fixtures are rebuilt on a clean
+  runner and checked against the committed digests, then formatting, lint
+  and the full test suite are run
+- Validation against three NIST CFReDS deleted-file-recovery images and The
+  Sleuth Kit (EXP-0008)
 
 ### Changed
 

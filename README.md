@@ -1,5 +1,7 @@
 # Taphonomy
 
+[![CI](https://github.com/bilalmughal1/taphonomy/actions/workflows/ci.yml/badge.svg)](https://github.com/bilalmughal1/taphonomy/actions/workflows/ci.yml)
+
 Taphonomy recovers deleted files, and files whose directories were lost to
 a quick format, from FAT32 disk images. It opens evidence read-only, reports
 what it could not analyse, and refuses a recovery it cannot support rather
