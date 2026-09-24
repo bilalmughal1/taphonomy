@@ -9,7 +9,7 @@
 # See docs/development/DEVELOPMENT_ENVIRONMENT.md section 11.
 #
 # Requirements:
-#   sfdisk                  util-linux
+#   sfdisk                  fdisk
 #   sgdisk                  gdisk
 #   mkfs.vfat               dosfstools
 #   mcopy, mmd, mdel, mrd   mtools
@@ -54,7 +54,7 @@ require() {
     }
 }
 
-require sfdisk "apt install util-linux"
+require sfdisk "apt install fdisk"
 require sgdisk "apt install gdisk"
 require mkfs.vfat "apt install dosfstools"
 require mcopy "apt install mtools"
