@@ -3,7 +3,7 @@
 ## Current Status
 
 Taphonomy is in early development and is not currently accepting external
-contributions. The repository is private and has a single author.
+contributions. It has a single author.
 
 This document will be expanded when the project is opened to outside
 contributors. Until then it records the standards that apply to all work in

@@ -3,8 +3,34 @@
 **Project:** Taphonomy
 **Document:** Security Specification
 **Version:** 0.1.0
-**Status:** Foundation
-**Last Updated:** 2026-08-28
+**Status:** In force
+**Last Updated:** 2026-09-24
+
+---
+
+## Reporting a Vulnerability
+
+Please do not report a security problem in a public issue.
+
+Report it privately, through this repository's **Report a vulnerability**
+button on GitHub, or by email to <contact@fahadbilal.com>. Include the
+Taphonomy commit you used, what you ran, and what happened. A crafted image
+that reproduces the problem is the most useful thing you can send; do not
+send real evidence belonging to anyone.
+
+In scope, most of all:
+
+* anything that modifies, or could modify, the evidence being read
+* a crash, hang or unbounded memory use caused by a crafted image
+* a recovered file written anywhere other than the directory given to
+  `--output`
+* a report that states something the evidence does not support
+
+Taphonomy has one maintainer. Reports are acknowledged on a best-effort
+basis, and there are no releases yet: fixes are made on `main`.
+
+The rest of this document states the security requirements the tool is
+built to.
 
 ---
 
