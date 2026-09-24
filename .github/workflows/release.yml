@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build, verify and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches the crate version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Install the fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fdisk gdisk dosfstools mtools
+          dpkg-query -W fdisk gdisk dosfstools mtools util-linux
+
+      - name: Install the pinned Rust toolchain and the static target
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+          rustc --version
+
+      - name: Generate the fixtures and check them against the committed digests
+        run: |
+          ./scripts/generate-fixtures.sh
+          git diff --exit-code -- fixtures/partition/MANIFEST.sha256
+
+      - name: Check formatting, lint and test
+        run: |
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --no-fail-fast
+
+      - name: Build the static release binary
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Run the release binary on a fixture before publishing it
+        run: |
+          binary="target/$TARGET/release/taphonomy"
+          file "$binary"
+          "$binary" fixtures/partition/fat32-formatted-tree.img --recover > smoke.txt
+          grep -F "artifacts    3 RECONSTRUCTED" smoke.txt
+
+      - name: Package the binary with its licence and digest
+        run: |
+          name="taphonomy-$GITHUB_REF_NAME-$TARGET"
+          mkdir "$name"
+          cp "target/$TARGET/release/taphonomy" LICENSE README.md "$name/"
+          tar --create --gzip --file "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          cat "$name.tar.gz.sha256"
+
+      - name: Take the release notes from the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## $version " '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' docs/development/CHANGELOG.md > notes.md
+          test -s notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="taphonomy-$GITHUB_REF_NAME-$TARGET"
+          gh release create "$GITHUB_REF_NAME" \
+            "$name.tar.gz" "$name.tar.gz.sha256" \
+            --title "Taphonomy $GITHUB_REF_NAME" \
+            --notes-file notes.md
