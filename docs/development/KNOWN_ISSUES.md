@@ -217,9 +217,15 @@ counted, and the 130th is named only inside the cluster that was refused, so
 it is never reached and never counted. A single gap can therefore stand for
 a subtree of any size, and the report says which directory it was.
 
+The orphan search (`ADR-0017`) reaches part of what such a gap hides, and
+only part. It never reads a directory the walk declined, but it finds any
+directory below one whose own first cluster still names itself and is
+free. `fat32-deleted-nested.img` measures both: the 129th level stays
+unread, and the 130th, named only inside it, is found by the search.
+
 ---
 
-## Four test suites are dominated by whole-image reads
+## Five test suites are dominated by whole-image reads
 
 `tests/cli_arguments.rs` runs the binary rather than calling into the
 crate, because argument handling and exit status are decisions `main`
@@ -228,13 +234,16 @@ eleven tests open a fixture, and the binary hashes the whole 64 MB image
 before it reports anything.
 
 `tests/coverage_reporting.rs` runs the binary for the same reason: coverage
-and the exit status derived from it are decided once per run. Its eight
-tests spawn it eleven times, and every one of those hashes an image.
+and the exit status derived from it are decided once per run. Its eleven
+tests spawn it twelve times, each on a fixture.
 
 `tests/recovery_output.rs` runs the binary because the destination checks
-are decisions `main` makes before the library is called. Six of its seven
-tests hash a 64 MB fixture. The seventh is refused before the evidence is
-opened.
+are decisions `main` makes before the library is called. Each of its nine
+tests spawns it once, naming a 64 MB fixture.
+
+`tests/orphaned_directories.rs` runs the binary because the orphan search
+runs inside it, after the walk. Each of its five tests spawns it once on a
+fixture.
 
 `tests/fat32_recovery_fixtures.rs` is comparable, and for a different
 reason. It calls into the crate and spawns no process, so the cost is not
@@ -253,8 +262,62 @@ between runs: the same day at `739d308`, `coverage_reporting` took 45.83
 seconds. Reading subdirectories lengthened them again: a run over the
 subtree fixture now recovers three files rather than reporting one gap.
 
+The orphan search added to every run of the binary. `ADR-0017` section 10
+condition 7 measured it on 2026-09-24, `c3278fe` against `4bd85d8`, three
+rounds interleaved, medians:
+
+```text
+tests/coverage_reporting.rs      30.51s  33.45s  +2.94s
+tests/recovery_output.rs         18.14s  19.42s  +1.28s
+tests/cli_arguments.rs           14.50s  15.65s  +1.15s
+tests/fat32_recovery_fixtures.rs  8.73s   8.56s  none
+```
+
+All nine pairs of the three suites that run the binary moved the same way;
+the fourth calls the crate and never runs the search. Timing the debug
+binary alone, five runs each on four fixtures, put the search at about 0.4
+seconds a run: one 64-byte read for nearly every one of the 127,006
+clusters a fixture volume holds. `tests/orphaned_directories.rs` took 13.76 seconds at
+`3ff77f7`.
+
 A fixture small enough for tests that only need an argument decision would
-help the three suites that run the binary and not
+help the four suites that run the binary and not
 `tests/fat32_recovery_fixtures.rs`. Reaching those decisions without a
-whole-image read would likewise help only the three. Neither is needed yet,
+whole-image read would likewise help only the four. Neither is needed yet,
 but the entry should not be read as naming a single suite.
+
+---
+
+## The orphan search's cost on real media is unmeasured
+
+The search reads the first 64 bytes of every cluster the walk did not
+reach, one read at a time. A fixture volume holds 127,006 clusters; a 32 GB
+card formatted with 32 KB clusters holds about a million. EXP-0008 timed a
+release build on 1 GiB CFReDS images at about ten seconds each, which
+includes hashing every byte, and did not separate the search's share.
+Reading many cluster starts per call would cut the reads by the same
+factor. `ADR-0017` promises nothing about speed, so no change is made
+without a measurement that needs it.
+
+---
+
+## FAT12 and FAT16 are identified and not analysed
+
+Every CFReDS FAT image carries a FAT12 or FAT16 partition and a FAT16
+partition beside its FAT32 one. EXP-0008 found eleven of the fifteen
+deleted files on three of those images on partitions the tool identifies
+correctly and does not read. The report states each as a filesystem not
+analysed, so coverage is honest; reach is not.
+
+---
+
+## A file fragmented around a live file is refused where another tool recovers it
+
+On `dfr-02-fat.dd` the run a deleted file's entry implies crosses a live
+file, and the tool refuses it (`ADR-0010` Decision C). The Sleuth Kit
+passes over the allocated clusters and recovers the file, and EXP-0008
+measured its recovery equal to the sectors NIST documents. Its rule is an
+inference too, which that layout rewards; on the interleaved layouts of
+DFR-05 the clusters it would pass over are free. Whether to adopt it,
+labelled as the inference it is, is a decision for its own ADR, measured on
+those images first.

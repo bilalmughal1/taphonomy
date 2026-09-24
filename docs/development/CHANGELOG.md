@@ -168,6 +168,19 @@ history.
   implies reaches a live cluster and is refused rather than extracted. The
   refusal is reached with no poked field, where the existing collision
   fixture needs one (EXP-0004 Appendix A.5)
+- A search, after the walk, of every data cluster the walk did not name,
+  for a directory whose first entry names that cluster and whose FAT entry
+  is free; each found is read under ADR-0016 Decision C and reported on its
+  own with the cluster its `..` names (ADR-0017 Decisions A and B)
+- The files an orphaned directory lists offered for recovery whether or not
+  marked deleted, under a heading that does not call them deleted
+  (ADR-0017 Decision C)
+- A fourteenth coverage gap, for an orphan search an evidence error
+  stopped, and a directory an orphaned listing names that the run never
+  read counted as unread (ADR-0017 Decision D)
+- Three fixtures: a quick-formatted DCF tree, the same volume written to
+  once more, and a deleted tree deeper than the walk's bound with one dot
+  entry broken (EXP-0007; ADR-0017 section 10)
 
 ### Changed
 
@@ -212,3 +225,9 @@ history.
 - Recovery caveats are computed from the run's counts rather than tracked
   separately alongside them, so the two cannot disagree (ADR-0014
   Appendix B.9)
+- The free-run caveat says nothing has claimed the clusters since the entry
+  lost them, where it said since deletion; an orphaned directory's files
+  were never deleted
+- A deleted directory's heading recovers its first character from the
+  long-name component before it, as its entry in the listing already did;
+  the two named one directory differently (EXP-0008)

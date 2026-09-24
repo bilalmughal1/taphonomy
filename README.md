@@ -6,8 +6,10 @@ The project is designed around evidence preservation, correctness, security, rep
 
 ## Project Status
 
-Taphonomy has a validated read-only evidence layer, reads FAT32 root
-directories, and recovers the data of an unfragmented deleted file.
+Taphonomy has a validated read-only evidence layer, reads every FAT32
+directory the root reaches, finds directories that nothing names, and
+recovers the data of an unfragmented file that is deleted or whose
+directory is orphaned.
 Recovered content is extracted to memory and reported as a SHA-256 digest.
 Where `--output` names a destination, each artifact is also written to a
 file, read back from disk, and reported as matching or differing from what
@@ -17,7 +19,9 @@ a match or a difference. Every run also states how much of the evidence it
 analysed and what it did not.
 
 Milestones M1 to M9 of ADR-0002 §8 are complete, which is the whole of that
-sequence, and M10 has since added the output path. Evidence images are
+sequence. M10 has since added the output path, M11 the reading of every
+directory the root reaches, and M12 the search for directories no read
+entry names (ADR-0017). Evidence images are
 opened read-only and hashed, MBR partition tables are parsed with every
 declared extent validated against the true evidence size, GPT is detected
 and reported as unsupported, filesystems are identified from volume
@@ -40,8 +44,9 @@ says a deleted file was unfragmented. Taphonomy computes the run the entry
 implies, reads every cluster of that run in the active FAT, and refuses the
 recovery where any of them is in use, naming the cluster that caused the
 refusal. A run of free clusters means only that nothing has claimed those
-clusters since the deletion, which is not evidence that the content there
-is the file's, and the tool says so rather than leaving it to be inferred.
+clusters since the entry lost them, which is not evidence that the content
+there is the file's, and the tool says so rather than leaving it to be
+inferred.
 Reading the content requires `--recover`.
 
 A digest on its own says only what was read. Comparing it against a
@@ -66,6 +71,16 @@ that file's. Every artifact carries one confidence level, `RECONSTRUCTED`,
 and a digest match is reported beside it rather than raising it. See
 `docs/decisions/ADR-0014-m9-classification-decisions.md`.
 
+A quick format rewrites the boot sector, the FATs and the root and leaves
+every directory below the root in place, named by nothing. After the walk,
+Taphonomy searches every cluster it did not reach for a directory whose
+first entry names that cluster and whose FAT entry is free, reads each one
+found, and offers the files it lists for recovery under the same checks as
+a deleted file's. EXP-0007 measured what a format leaves; one write after
+it puts a new tree on the same clusters, and then no directory record of
+the old files survives. See
+`docs/decisions/ADR-0017-m12-orphaned-directory-decisions.md`.
+
 The initial development sequence is:
 
 1. ~~Establish project, safety, security, and architecture contracts.~~ Done.
@@ -88,6 +103,14 @@ refused rather than recovered, which is the arrangement the tool handles
 correctly. That is two arrangements of many. Which of the rest remain
 unmeasured, and which cannot be built with the fixture laboratory as it
 stands, is recorded in `docs/development/KNOWN_ISSUES.md`.
+
+EXP-0008 measured the tool against three of NIST's CFReDS deleted-file
+recovery images and The Sleuth Kit 4.12.1. Every file it recovered from
+their FAT32 partitions equals the sectors NIST documents for that file and
+equals The Sleuth Kit's recovery. On a file fragmented around a live file
+it refused, where The Sleuth Kit recovered the file correctly. It reached
+four of the fifteen deleted files: the other eleven are on the FAT12 and
+FAT16 partitions every one of those images carries.
 
 ## Exit Status
 
@@ -322,29 +345,36 @@ At this stage:
 * a recovered artifact is written whole at the size its entry declared, so
   nothing about the file tells an operator whether the content is the
   file's; only a reference digest can establish that
-* only FAT32 is parsed beyond the partition table; exFAT and NTFS are
-  identified and reported as unsupported
+* only FAT32 is parsed beyond the partition table; FAT12 and FAT16 are
+  identified and not analysed, and exFAT and NTFS are identified and
+  reported as unsupported
 * a deleted directory is read from its first cluster alone: its chain is
   zeroed, so no later cluster of it can be located, and a listing that may
   have continued past that cluster is reported as a gap
 * the walk reads no cluster twice and stops 128 levels below the root; each
   is reported as a gap, and a directory below one of those bounds hides
-  everything named inside it
+  everything named inside it that the orphan search does not find
+* a directory nothing names is found only where its first cluster still
+  names itself and the FAT marks it free; on a volume written to after a
+  format no such cluster survives
 * only an unfragmented deleted file is recovered; a run reaching an
   allocated cluster is refused rather than reconstructed
 * recovered content is compared only against a reference the operator
   supplies; the tool never discovers one
 * one confidence level is reachable, so every artifact carries the same one
   and a reference match does not raise it
-* the long name of a deleted entry is not decoded; only its short name is
-  recovered, and only where a long-name entry survives to determine it
+* no long name is assembled, for a live entry or a deleted one; every name
+  is shown in its 8.3 form, and a deleted entry's first character is
+  recovered only where a long-name entry survives to determine it
 * only MBR partition tables are parsed; GPT is detected but not parsed
 * only 512-byte sectors are supported
 * physical-device recovery is not supported
-* recovery accuracy has not yet been established
-* filesystem support has not yet been validated
+* recovery accuracy is measured on the FAT32 partitions of three NIST
+  CFReDS images and nowhere else (EXP-0008); it is not established in
+  general
 * production recovery workflows have not been established
-* performance characteristics have not yet been measured
+* release-build performance is measured in single runs only: it read and
+  analysed each 1 GiB CFReDS image in about ten seconds (EXP-0008)
 
 These limitations will change only when implementation and validation provide evidence for doing so.
 
