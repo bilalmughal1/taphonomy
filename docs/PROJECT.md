@@ -1,10 +1,10 @@
 # Taphonomy Project Specification
 
 **Project:** Taphonomy
-**Status:** Foundation
+**Status:** Active development; M12 complete
 **Version:** 0.1.0
 **Owner:** Fahad Bilal Saleem
-**Repository:** Private
+**Repository:** <https://github.com/bilalmughal1/taphonomy>
 **Primary Environment:** Linux via WSL2 on Windows
 **Development Model:** Local-first, evidence-preserving, test-driven
 
@@ -342,21 +342,80 @@ A Taphonomy feature is complete only when:
 
 ## 11. Current Status
 
-Taphonomy has a validated read-only evidence layer, a FAT32 boot sector
-parser, a FAT32 root directory reader that identifies deleted entries,
-and recovery of the data of an unfragmented deleted file. Recovery
-extracts to memory and reports a digest; no file is written. Where the
-operator supplies a reference digest, the recovered digest is compared
-against it, and the artifact carries the one confidence level ADR-0003's
-model leaves reachable.
+This section is descriptive (`ADR-0011` Decision B): where it disagrees with
+the code, it is wrong.
 
-Milestones M1 to M9 of ADR-0002 section 8 are complete, which is the whole
-of that sequence. The next engineering objective is item 5 of the README's
-development sequence, validating recovery accuracy: the characteristic
-false positive is measured and the rest of the space is not.
+Taphonomy opens a disk image read-only and hashes every byte, parses its
+MBR partition table against the image's true size, and identifies each
+partition's filesystem from its structure. On a FAT32 volume it reads every
+directory the root reaches, a deleted one from its first cluster alone, and
+then searches the clusters it did not reach for directories nothing names.
+It recovers a file whose implied run is entirely free and refuses one whose
+run reaches a cluster in use. With `--output` each artifact is written, read
+back and verified; with `--reference-digest` it is compared against the
+operator's digest. Every artifact carries the one confidence level
+`ADR-0003`'s model leaves reachable, and every run states what it did not
+analyse.
+
+Milestones M1 to M9 of `ADR-0002` section 8 are complete. M10 added the
+output path (`ADR-0015`), M11 the reading of every directory
+(`ADR-0016`), and M12 the search for orphaned directories (`ADR-0017`).
+
+The test fixtures, 28 disk images, are generated from ordinary filesystem
+tools and are byte-identical on every build. EXP-0008 measured the tool
+against three NIST CFReDS deleted-file-recovery images and The Sleuth Kit:
+every file it recovered from their FAT32 partitions equals the sectors NIST
+documents and The Sleuth Kit's recovery; it refused one file The Sleuth Kit
+recovered correctly; and it reached four of the fifteen deleted files, the
+rest being on FAT12 and FAT16 partitions it does not analyse.
+
+Against the phases of section 8:
+
+| Phase | Status |
+| --- | --- |
+| 0 Foundation | Done |
+| 1 Safe device discovery | Not started: the tool reads disk images, and physical devices are outside its current scope |
+| 2 Evidence acquisition | Not started, for the same reason |
+| 3 Evidence inspection | Done for MBR partition tables and the FAT family's identification |
+| 4 First recovery engine | Done for FAT32 |
+| 5 Recovery laboratory | In part: deletion, two fragmentation arrangements, single-field corruption and known-good files are fixtures; filesystem-wide corruption and partial damage are not |
+| 6 Additional filesystems | Not started; FAT12 and FAT16 are the nearest |
+| 7 Specialized recovery | Not started |
+
+Against the development sequence the project began with:
+
+1. ~~Establish project, safety, security, and architecture contracts.~~ Done.
+2. ~~Build a read-only evidence abstraction.~~ Done.
+3. ~~Build a synthetic evidence laboratory.~~ Done.
+4. ~~Implement one narrowly defined recovery capability.~~ Done.
+5. Validate recovery accuracy, including false positives. In part: the
+   characteristic false positive is measured on fixtures, and EXP-0008 on
+   three NIST images.
+6. Add regression, property, integration, and fuzz testing where
+   appropriate. In part: regression and integration tests exist; property
+   and fuzz tests do not.
+7. Expand recovery capabilities based on research and measured results.
+   Under way: M10 to M12.
 
 The technology stack is selected and recorded in ADR-0001. The safety
 and development contracts this section previously described as pending
 are established in `docs/SAFETY.md`, `SECURITY.md` and
 `docs/development/DEVELOPMENT_ENVIRONMENT.md`.
 
+---
+
+## 12. Status Terminology
+
+Project documentation distinguishes between:
+
+* **Implemented**: code exists for the described behavior.
+* **Tested**: automated or controlled tests have been run.
+* **Experimentally validated**: controlled evidence supports the behavior.
+* **Partially supported**: only a defined subset has been implemented or validated.
+* **Untested**: implementation exists but relevant validation has not been performed.
+* **Known limitation**: a documented limitation is understood.
+* **Planned**: intended future work that has not been implemented.
+
+Claims about recovery capability should use these terms accurately. This
+definition moved here from `README.md`, so that it has one owner
+(`ADR-0011` Decision E).
