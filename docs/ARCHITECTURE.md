@@ -1173,7 +1173,7 @@ it remains intent. `ADR-0011` Decision A defines the distinction.
 | 24 State Management | No global mutable state |
 | 28 Local-First | One dependency, `sha2`; nothing reaches a network |
 | 36 Candidate vs Verified Artifact | `src/confidence.rs` (`ADR-0003`, `ADR-0014`) |
-| 38, 39, 40 Testing, Fixtures, Laboratory | Unit tests, fourteen integration harnesses, generated fixtures, `docs/development/EXPERIMENTS.md` |
+| 38, 39, 40 Testing, Fixtures, Laboratory | Unit tests, eleven integration harnesses, generated fixtures, `docs/development/EXPERIMENTS.md` |
 
 **In part.**
 
