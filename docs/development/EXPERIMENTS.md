@@ -2233,3 +2233,14 @@ of them: the mixture is the implied run, which Taphonomy refused.
    recovers.
 2. Decide the next milestone from this record: FAT12 and FAT16, long
    names, or the fragmented cases.
+
+### Appendix A: ten on FAT12 and FAT16, not eleven (2026-09-25)
+
+Conclusion 4 says the eleven deleted files Taphonomy did not reach are on
+FAT12 and FAT16 partitions. The Reach table in Actual result says
+otherwise: five of the fifteen are on the FAT32 partitions, one on
+`dfr-01`, one on `dfr-02` and three on `dfr-11`. Taphonomy recovered four
+of those five and refused the fifth, `dfr-02`'s `Bellatrix.txt`. Of the
+eleven it did not reach, ten are on FAT12 and FAT16 partitions and one is
+that refusal. The table is right and the conclusion is not. The body is
+not rewritten; every measurement in it is unchanged.

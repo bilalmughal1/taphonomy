@@ -305,7 +305,7 @@ without a measurement that needs it.
 ## FAT12 and FAT16 are identified and not analysed
 
 Every CFReDS FAT image carries a FAT12 or FAT16 partition and a FAT16
-partition beside its FAT32 one. EXP-0008 found eleven of the fifteen
+partition beside its FAT32 one. EXP-0008 found ten of the fifteen
 deleted files on three of those images on partitions the tool identifies
 correctly and does not read. The report states each as a filesystem not
 analysed, so coverage is honest; reach is not.

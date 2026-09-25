@@ -366,8 +366,8 @@ tools and are byte-identical on every build. EXP-0008 measured the tool
 against three NIST CFReDS deleted-file-recovery images and The Sleuth Kit:
 every file it recovered from their FAT32 partitions equals the sectors NIST
 documents and The Sleuth Kit's recovery; it refused one file The Sleuth Kit
-recovered correctly; and it reached four of the fifteen deleted files, the
-rest being on FAT12 and FAT16 partitions it does not analyse.
+recovered correctly; and it reached four of the fifteen deleted files. The
+other ten are on FAT12 and FAT16 partitions it does not analyse.
 
 Against the phases of section 8:
 

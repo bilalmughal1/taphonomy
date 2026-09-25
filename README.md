@@ -59,9 +59,9 @@ Every file Taphonomy recovered is the file that was deleted. On `dfr-02`
 the run its entry implies is half another, still-existing file; Taphonomy
 refused it where The Sleuth Kit's rule for passing over allocated clusters
 happened to reach the right one. Across the three images Taphonomy reached
-four of the fifteen deleted files: the other eleven sit on the FAT12 and
-FAT16 partitions each image carries, which it identifies and does not yet
-analyse.
+four of the fifteen deleted files and refused that one. The other ten sit
+on the FAT12 and FAT16 partitions each image carries, which it identifies
+and does not yet analyse.
 
 ## Quick start
 
@@ -186,7 +186,7 @@ research in [RESEARCH_LOG.md](docs/development/RESEARCH_LOG.md); changes in
 
 Not yet implemented, in the order the evidence above suggests:
 
-1. FAT12 and FAT16, where eleven of the fifteen deleted files in EXP-0008
+1. FAT12 and FAT16, where ten of the fifteen deleted files in EXP-0008
    were out of reach.
 2. Long file names.
 3. exFAT, the filesystem of most cards larger than 32 GB.
