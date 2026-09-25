@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use taphonomy::EvidenceFile;
 use taphonomy::Sha256Digest;
 use taphonomy::analysis::{
-    Coverage, Event, MAX_DEPTH, NotReadReason, Options, Reached, RunCounts, Sink,
+    Coverage, DirectoryPart, Event, MAX_DEPTH, NotReadReason, Options, Reached, RunCounts, Sink,
 };
 use taphonomy::confidence::Confidence;
 use taphonomy::fat_directory::{
@@ -229,7 +229,7 @@ fn inspect(path: &std::ffi::OsStr, options: Options<'_>) -> Result<Coverage, tap
 
     println!();
 
-    let mut sink = StdoutSink;
+    let mut sink = StdoutSink::default();
     let counts = taphonomy::analysis::run(&mut evidence, result.bytes_read, options, &mut sink);
 
     print_summary(&counts, options);
@@ -243,7 +243,44 @@ fn inspect(path: &std::ffi::OsStr, options: Options<'_>) -> Result<Coverage, tap
 /// `ADR-0018` Decision B. Every match arm renders one event's fields; none
 /// carries text formatted elsewhere. This is the only `Sink` the CLI has,
 /// and the only place in this file that prints what a run found.
-struct StdoutSink;
+///
+/// Whether a content heading has printed is state the sink keeps for
+/// itself: `ADR-0018` follow-up moved that decision out of the library,
+/// which now reports `listing` and `part` as findings on every content
+/// event and lets a sink do whatever rendering, or none, it likes with
+/// them. A `Directory` event starts a new directory and resets both.
+#[derive(Default)]
+struct StdoutSink {
+    /// Whether this directory's current-listing heading has printed.
+    entries_heading_printed: bool,
+
+    /// Whether this directory's residue heading has printed.
+    residue_heading_printed: bool,
+}
+
+impl StdoutSink {
+    /// Prints a content heading before the first finding of a
+    /// `(listing, part)` pass and never again for the same directory,
+    /// exactly as `report_recovery` used to decide for itself.
+    /// `ADR-0017` Decision C: an orphaned listing's files are not
+    /// deleted, so its heading says so.
+    fn head_content(&mut self, listing: Listing, part: DirectoryPart) {
+        let printed = match part {
+            DirectoryPart::Entries => &mut self.entries_heading_printed,
+            DirectoryPart::Residue => &mut self.residue_heading_printed,
+        };
+        if *printed {
+            return;
+        }
+        *printed = true;
+
+        let title = match listing {
+            Listing::Walked => "deleted content",
+            Listing::Orphaned => "orphaned content",
+        };
+        println!("      {title}");
+    }
+}
 
 impl Sink for StdoutSink {
     fn record(&mut self, event: Event<'_>) {
@@ -282,6 +319,8 @@ impl Sink for StdoutSink {
                 println!("    ROOT DIRECTORY NOT ENUMERATED: {error}");
             }
             Event::Directory { reached, directory } => {
+                self.entries_heading_printed = false;
+                self.residue_heading_printed = false;
                 print_directory(&heading_of(reached), directory);
             }
             Event::DirectoryNotRead { reached, reason } => {
@@ -312,28 +351,31 @@ impl Sink for StdoutSink {
                 println!("      NOT READ: cluster {first_cluster} was not found by the search");
             }
             Event::NotAssessed {
-                block,
+                listing,
+                part,
                 entry,
                 error,
             } => {
-                render_block_heading(block);
+                self.head_content(listing, part);
                 println!("        {:<9} NOT ASSESSED: {error}", entry_position(entry));
             }
             Event::Ineligible {
-                block,
+                listing,
+                part,
                 entry,
                 reason,
             } => {
-                render_block_heading(block);
+                self.head_content(listing, part);
                 println!("        {:<9} no content: {reason}", entry_position(entry));
             }
             Event::RunBroken {
-                block,
+                listing,
+                part,
                 entry,
                 run,
                 first_allocated,
             } => {
-                render_block_heading(block);
+                self.head_content(listing, part);
                 let detail = format!(
                     "run {}-{}, {} bytes, REFUSED: cluster {first_allocated} is in use",
                     run.first_cluster,
@@ -342,8 +384,13 @@ impl Sink for StdoutSink {
                 );
                 println!("        {:<9} {detail}", entry_position(entry));
             }
-            Event::Recoverable { block, entry, run } => {
-                render_block_heading(block);
+            Event::Recoverable {
+                listing,
+                part,
+                entry,
+                run,
+            } => {
+                self.head_content(listing, part);
                 let detail = format!(
                     "run {}-{}, {} bytes, {} slack, every cluster free",
                     run.first_cluster,
@@ -354,6 +401,8 @@ impl Sink for StdoutSink {
                 println!("        {:<9} {detail}", entry_position(entry));
             }
             Event::Extracted {
+                listing: _,
+                part: _,
                 entry: _,
                 extraction,
                 validation,
@@ -383,7 +432,12 @@ impl Sink for StdoutSink {
                     _ => {}
                 }
             }
-            Event::NotExtracted { entry: _, error } => {
+            Event::NotExtracted {
+                listing: _,
+                part: _,
+                entry: _,
+                error,
+            } => {
                 println!("        {:<9} NOT EXTRACTED: {error}", "");
             }
         }
@@ -393,18 +447,6 @@ impl Sink for StdoutSink {
 /// The `c{cluster} s{slot}` position column shared by every content line.
 fn entry_position(entry: &Entry) -> String {
     format!("c{} s{}", entry.cluster, entry.slot)
-}
-
-/// Prints the heading of a content block, the first time something in it is
-/// reported and never again. `ADR-0017` Decision C.
-fn render_block_heading(block: Option<Listing>) {
-    let Some(listing) = block else { return };
-
-    let title = match listing {
-        Listing::Walked => "deleted content",
-        Listing::Orphaned => "orphaned content",
-    };
-    println!("      {title}");
 }
 
 /// The heading a directory, or a directory not read, is reported under.

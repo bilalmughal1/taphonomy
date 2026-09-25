@@ -72,7 +72,7 @@ pub struct Options<'a> {
 /// `ADR-0018`. A directory event names its own origin, so a sink can render
 /// the heading a listing used to carry as literal text without being handed
 /// that text.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Reached<'a> {
     /// The volume's root directory.
     Root,
@@ -87,8 +87,24 @@ pub enum Reached<'a> {
     Orphaned { cluster: u32, parent: Option<u32> },
 }
 
+/// Which part of a directory an entry was read from.
+///
+/// `ADR-0018` follow-up. An entry past the terminator is residue: the
+/// volume's current listing does not claim it, and it is kept rather
+/// than discarded under `ADR-0009` Decision B. An examiner reads the
+/// two differently, so this is a finding carried on every content
+/// event, not a rendering choice left to a sink to reconstruct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectoryPart {
+    /// Before the terminator, in the directory's current listing.
+    Entries,
+
+    /// Past the terminator: content the terminator does not claim.
+    Residue,
+}
+
 /// Why a named directory's contents were not read.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum NotReadReason<'a> {
     /// Deeper below the root than [`MAX_DEPTH`].
     TooDeep,
@@ -191,24 +207,28 @@ pub enum Event<'a> {
 
     /// A deleted entry's assessment failed.
     ///
-    /// `block` is `Some` exactly for the first finding rendered from this
-    /// listing, so a sink can print the heading once and only then.
+    /// `listing` and `part` are always present: which listing the entry
+    /// was offered under, and which part of the directory it came from.
+    /// Neither is a rendering choice; `ADR-0018` follow-up.
     NotAssessed {
-        block: Option<Listing>,
+        listing: Listing,
+        part: DirectoryPart,
         entry: &'a Entry,
         error: &'a RecoveryError,
     },
 
     /// A deleted entry whose fields locate no content.
     Ineligible {
-        block: Option<Listing>,
+        listing: Listing,
+        part: DirectoryPart,
         entry: &'a Entry,
         reason: Ineligible,
     },
 
     /// A deleted entry whose implied run holds an allocated cluster.
     RunBroken {
-        block: Option<Listing>,
+        listing: Listing,
+        part: DirectoryPart,
         entry: &'a Entry,
         run: ClusterRun,
         first_allocated: u32,
@@ -216,7 +236,8 @@ pub enum Event<'a> {
 
     /// A deleted entry whose implied run is free.
     Recoverable {
-        block: Option<Listing>,
+        listing: Listing,
+        part: DirectoryPart,
         entry: &'a Entry,
         run: ClusterRun,
     },
@@ -226,16 +247,23 @@ pub enum Event<'a> {
     /// `readback_matches` is `Some` exactly where `extraction.output` is
     /// [`Output::Written`], and then states whether the bytes read back
     /// from the destination equal `extraction.digest`. `None` for every
-    /// other outcome, including no destination at all.
+    /// other outcome, including no destination at all. `listing` and
+    /// `part` are as on [`Event::Recoverable`], the event this always
+    /// follows.
     Extracted {
+        listing: Listing,
+        part: DirectoryPart,
         entry: &'a Entry,
         extraction: &'a Extraction,
         validation: Validation,
         readback_matches: Option<bool>,
     },
 
-    /// A free run whose extraction failed.
+    /// A free run whose extraction failed. `listing` and `part` are as on
+    /// [`Event::Recoverable`], the event this always follows.
     NotExtracted {
+        listing: Listing,
+        part: DirectoryPart,
         entry: &'a Entry,
         error: &'a RecoveryError,
     },
@@ -744,6 +772,7 @@ fn report_root_directory<R: EvidenceReader>(
         extent,
         &root.entries,
         Listing::Walked,
+        DirectoryPart::Entries,
         options,
         counts,
         sink,
@@ -754,6 +783,7 @@ fn report_root_directory<R: EvidenceReader>(
         extent,
         &root.residue,
         Listing::Walked,
+        DirectoryPart::Residue,
         options,
         counts,
         sink,
@@ -886,6 +916,7 @@ fn search_orphaned_directories<R: EvidenceReader>(
             extent,
             &directory.entries,
             Listing::Orphaned,
+            DirectoryPart::Entries,
             options,
             counts,
             sink,
@@ -896,6 +927,7 @@ fn search_orphaned_directories<R: EvidenceReader>(
             extent,
             &directory.residue,
             Listing::Orphaned,
+            DirectoryPart::Residue,
             options,
             counts,
             sink,
@@ -1092,6 +1124,7 @@ fn report_subdirectory<R: EvidenceReader>(
         extent,
         &directory.entries,
         Listing::Walked,
+        DirectoryPart::Entries,
         options,
         counts,
         sink,
@@ -1102,6 +1135,7 @@ fn report_subdirectory<R: EvidenceReader>(
         extent,
         &directory.residue,
         Listing::Walked,
+        DirectoryPart::Residue,
         options,
         counts,
         sink,
@@ -1124,24 +1158,24 @@ fn report_recovery<R: EvidenceReader>(
     extent: VolumeExtent,
     entries: &[Entry],
     listing: Listing,
+    part: DirectoryPart,
     options: Options<'_>,
     counts: &mut RunCounts,
     sink: &mut dyn Sink,
 ) {
-    // `ADR-0017` Decision C. An orphaned listing's files are not deleted, so
-    // its block is not headed as though they were; the heading text itself
-    // is a rendering choice, made from `listing` by the sink.
-    let mut printed = false;
-
+    // `ADR-0017` Decision C. An orphaned listing's files are not deleted;
+    // `listing` says so. `part` says whether `entries` is the directory's
+    // current listing or its residue past the terminator. Both are
+    // findings carried on every event; whether and when to head them is
+    // a rendering choice left entirely to the sink.
     for entry in entries {
         let assessment = match assess_listed(entry, listing, boot, extent, evidence) {
             Ok(None) => continue,
             Ok(Some(assessment)) => assessment,
             Err(e) => {
-                let block = (!printed).then_some(listing);
-                printed = true;
                 sink.record(Event::NotAssessed {
-                    block,
+                    listing,
+                    part,
                     entry,
                     error: &e,
                 });
@@ -1150,13 +1184,11 @@ fn report_recovery<R: EvidenceReader>(
             }
         };
 
-        let block = (!printed).then_some(listing);
-        printed = true;
-
         match assessment {
             Assessment::Ineligible(reason) => {
                 sink.record(Event::Ineligible {
-                    block,
+                    listing,
+                    part,
                     entry,
                     reason,
                 });
@@ -1185,7 +1217,8 @@ fn report_recovery<R: EvidenceReader>(
                 first_allocated,
             } => {
                 sink.record(Event::RunBroken {
-                    block,
+                    listing,
+                    part,
                     entry,
                     run,
                     first_allocated,
@@ -1195,7 +1228,8 @@ fn report_recovery<R: EvidenceReader>(
             Assessment::Recoverable(found) => {
                 counts.free_runs += 1;
                 sink.record(Event::Recoverable {
-                    block,
+                    listing,
+                    part,
                     entry,
                     run: *found.run(),
                 });
@@ -1240,6 +1274,8 @@ fn report_recovery<R: EvidenceReader>(
                             }
 
                             sink.record(Event::Extracted {
+                                listing,
+                                part,
                                 entry,
                                 extraction: &extracted,
                                 validation,
@@ -1247,7 +1283,12 @@ fn report_recovery<R: EvidenceReader>(
                             });
                         }
                         Err(e) => {
-                            sink.record(Event::NotExtracted { entry, error: &e });
+                            sink.record(Event::NotExtracted {
+                                listing,
+                                part,
+                                entry,
+                                error: &e,
+                            });
                             counts.not_extracted += 1;
                         }
                     }

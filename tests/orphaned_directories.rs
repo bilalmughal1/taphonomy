@@ -87,15 +87,14 @@ struct RecordingSink {
 }
 
 impl RecordingSink {
-    /// Records which listing's heading, if either, a content finding was
-    /// reported under. `ADR-0017` Decision C: only the first finding under
-    /// a listing carries it, which is exactly when the heading text would
-    /// have printed.
-    fn note_block(&mut self, block: Option<Listing>) {
-        match block {
-            Some(Listing::Walked) => self.saw_deleted_content = true,
-            Some(Listing::Orphaned) => self.saw_orphaned_content = true,
-            None => {}
+    /// Records which listing a content finding was reported under.
+    /// `ADR-0018` follow-up: every content event carries its `Listing`
+    /// directly now, so this is a plain match rather than a check for
+    /// whichever finding happened to fire first under that listing.
+    fn note_listing(&mut self, listing: Listing) {
+        match listing {
+            Listing::Walked => self.saw_deleted_content = true,
+            Listing::Orphaned => self.saw_orphaned_content = true,
         }
     }
 }
@@ -117,10 +116,10 @@ impl Sink for RecordingSink {
             Event::OrphanedListingUnread { first_cluster, .. } => {
                 self.orphaned_listing_unread.push(first_cluster);
             }
-            Event::NotAssessed { block, .. } => self.note_block(block),
-            Event::Ineligible { block, .. } => self.note_block(block),
-            Event::RunBroken { block, .. } => self.note_block(block),
-            Event::Recoverable { block, .. } => self.note_block(block),
+            Event::NotAssessed { listing, .. } => self.note_listing(listing),
+            Event::Ineligible { listing, .. } => self.note_listing(listing),
+            Event::RunBroken { listing, .. } => self.note_listing(listing),
+            Event::Recoverable { listing, .. } => self.note_listing(listing),
             Event::Extracted { extraction, .. } => {
                 self.extracted
                     .push((extraction.digest, extraction.bytes_hashed));
