@@ -226,7 +226,7 @@ unread, and the 130th, named only inside it, is found by the search.
 
 ---
 
-## Five test suites are dominated by whole-image reads
+## Four test suites are dominated by whole-image reads
 
 `tests/cli_arguments.rs` runs the binary rather than calling into the
 crate, because argument handling and exit status are decisions `main`
@@ -242,11 +242,16 @@ tests spawn it twelve times, each on a fixture.
 are decisions `main` makes before the library is called. Each of its nine
 tests spawns it once, naming a 64 MB fixture.
 
-`tests/orphaned_directories.rs` runs the binary, but not because the
-search runs inside it any more: `ADR-0018` moved the orphan search into
-`src/analysis.rs`. Its five tests have simply not been rewritten to call
-the library directly; that rewrite is scheduled in `ADR-0018` section 5
-as its own commit. Each test spawns the binary once on a fixture.
+`tests/orphaned_directories.rs` no longer belongs in this list. Five of
+its six tests call `taphonomy::analysis::run` directly and compute no
+digest. The sixth runs the binary once, for three lines of output no
+other test asserts.
+
+On 2026-09-26 its median fell from 8.39 to 4.31 seconds over three runs
+before the rewrite and three after. The runs were not interleaved and
+the timings were unstable: `tests/coverage_reporting.rs`, which the
+rewrite did not touch, ranged from 8.79 to 23.18 seconds in the same
+session. The figures show the suite roughly halved, and no more.
 
 `tests/fat32_recovery_fixtures.rs` is comparable, and for a different
 reason. It calls into the crate and spawns no process, so the cost is not
@@ -302,11 +307,14 @@ Every suite fell by roughly five to ten times. Only `sha2` runs
 optimised, so the fall is attributed to hashing. It is the same
 whole-image read, done by a faster hasher, not a smaller read.
 
-A fixture small enough for tests that only need an argument decision would
-help the four suites that run the binary and not
-`tests/fat32_recovery_fixtures.rs`. Reaching those decisions without a
-whole-image read would likewise help only the four. Neither is needed yet,
-but the entry should not be read as naming a single suite.
+A fixture small enough for tests that only need an argument decision
+would help `tests/cli_arguments.rs`, `tests/coverage_reporting.rs` and
+`tests/recovery_output.rs`, not `tests/fat32_recovery_fixtures.rs` and
+not `tests/orphaned_directories.rs`'s one remaining binary test, which
+asserts renderings rather than an argument decision. Reaching those
+decisions without a whole-image read would likewise help only the
+three. Neither is needed yet, but the entry should not be read as
+naming a single suite.
 
 ---
 
