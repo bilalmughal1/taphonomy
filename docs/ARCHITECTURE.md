@@ -1183,13 +1183,14 @@ it remains intent. `ADR-0011` Decision A defines the distinction.
 | 5.7 Reporting | A text report on standard output, with coverage (`ADR-0014`); no structured report |
 | 7 Filesystem Implementations | FAT32 only; FAT12, FAT16, exFAT and NTFS are identified and not analysed |
 | 17 Virtual Evidence | Raw disk images and an in-memory test double; no physical or segmented evidence |
-| 13, 26 Dependency Direction, CLI Boundary | A binary over a library crate; the library is not layered |
+| 13, 26 Dependency Direction, CLI Boundary | A binary over a library crate; `src/analysis.rs` (`ADR-0018`) is an application layer between the CLI and the domain modules it calls; no further internal layering exists |
+| 20 Result Model | An event stream and counts, `taphonomy::analysis::Event` and `RunCounts` (`ADR-0018`); no operation identity and no serialised result |
 
 **Not built.** 5.1 Device Discovery; 5.3 Acquisition; 6 and 8 to 11, the
-domains beyond filesystem recovery from images; 20 Result Model; 21
-Operation Identity; 25 Configuration beyond command-line arguments; 27 and
-29 to 33, other interfaces, external tools, plugins, databases, web and
-desktop; 37 Observability; 41 Versioning; 42 Compatibility.
+domains beyond filesystem recovery from images; 21 Operation Identity;
+25 Configuration beyond command-line arguments; 27 and 29 to 33, other
+interfaces, external tools, plugins, databases, web and desktop; 37
+Observability; 41 Versioning; 42 Compatibility.
 
 **Invariants.** 1, 2 and 6 hold for the reasons in the tables above. 5
 holds: recovery is `src/fat_recovery.rs` and comparison against a reference
@@ -1198,9 +1199,9 @@ is `src/validation.rs`. 10 holds: every capability has a decision record in
 yet, since there is no acquisition. 7 holds as far as parsing is
 bounds-checked; no fuzz testing exists (`SECURITY.md` section 36).
 
-**Invariant 8 is not met.** The directory walk and the orphan search,
-`report_root_directory`, `report_subdirectory`, `queue_subdirectories` and
-`search_orphaned_directories`, are domain logic and live in `src/main.rs`,
-the CLI binary. They should move into the library, which would also let
-their tests call them without running the binary. Recorded in
-`docs/development/KNOWN_ISSUES.md`.
+**Invariant 8 holds.** `ADR-0018`. The partition loop, the directory walk,
+the orphan search and the run's counts are `src/analysis.rs`, called from
+`src/main.rs` through `taphonomy::analysis::run` and a `Sink` the CLI
+implements to render its events. `src/main.rs` keeps argument handling, the
+checks on an output directory, opening and hashing the evidence, rendering,
+and the exit status.

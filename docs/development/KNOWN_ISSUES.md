@@ -242,9 +242,11 @@ tests spawn it twelve times, each on a fixture.
 are decisions `main` makes before the library is called. Each of its nine
 tests spawns it once, naming a 64 MB fixture.
 
-`tests/orphaned_directories.rs` runs the binary because the orphan search
-runs inside it, after the walk. Each of its five tests spawns it once on a
-fixture.
+`tests/orphaned_directories.rs` runs the binary, but not because the
+search runs inside it any more: `ADR-0018` moved the orphan search into
+`src/analysis.rs`. Its five tests have simply not been rewritten to call
+the library directly; that rewrite is scheduled in `ADR-0018` section 5
+as its own commit. Each test spawns the binary once on a fixture.
 
 `tests/fat32_recovery_fixtures.rs` is comparable, and for a different
 reason. It calls into the crate and spawns no process, so the cost is not
@@ -280,6 +282,25 @@ binary alone, five runs each on four fixtures, put the search at about 0.4
 seconds a run: one 64-byte read for nearly every one of the 127,006
 clusters a fixture volume holds. `tests/orphaned_directories.rs` took 13.76 seconds at
 `3ff77f7`.
+
+Measured 2026-09-25 at `8b08d41`, with one change: `sha2` alone built at
+`opt-level = 3` in the dev profile (`Cargo.toml`). Three rounds, each
+running `cargo test --workspace --no-fail-fast` without the change and
+then with it; medians:
+
+```text
+                                  before    after
+tests/cli_arguments.rs            20.46s     2.43s
+tests/coverage_reporting.rs       41.95s     6.40s
+tests/orphaned_directories.rs     17.16s     2.72s
+tests/recovery_output.rs          26.14s     4.92s
+tests/fat32_recovery_fixtures.rs   9.86s     0.97s
+whole command                    116.67s    17.62s
+```
+
+Every suite fell by roughly five to ten times. Only `sha2` runs
+optimised, so the fall is attributed to hashing. It is the same
+whole-image read, done by a faster hasher, not a smaller read.
 
 A fixture small enough for tests that only need an argument decision would
 help the four suites that run the binary and not
@@ -322,20 +343,6 @@ inference too, which that layout rewards; on the interleaved layouts of
 DFR-05 the clusters it would pass over are free. Whether to adopt it,
 labelled as the inference it is, is a decision for its own ADR, measured on
 those images first.
-
----
-
-## Domain logic lives in the CLI binary
-
-`docs/ARCHITECTURE.md` Invariant 8 says the CLI must not contain domain
-recovery logic. The directory walk and the orphan search do:
-`report_root_directory`, `report_subdirectory`, `queue_subdirectories` and
-`search_orphaned_directories` are in `src/main.rs`. Two consequences follow.
-Their tests must run the binary, and each run hashes a whole 64 MB image,
-which is most of why the four suites that spawn it are the slow ones. And a
-future interface over the library would have to repeat them. Moving them
-into the library is a refactor with no change in behaviour, best done
-before any new capability builds on the walk.
 
 ---
 
