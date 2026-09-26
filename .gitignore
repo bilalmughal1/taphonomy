@@ -42,3 +42,6 @@ Thumbs.db
 
 # Windows download artefacts
 *:Zone.Identifier
+
+# Python bytecode from the experiment scripts
+__pycache__/
