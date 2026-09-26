@@ -2244,3 +2244,206 @@ of those five and refused the fifth, `dfr-02`'s `Bellatrix.txt`. Of the
 eleven it did not reach, ten are on FAT12 and FAT16 partitions and one is
 that refusal. The table is right and the conclusion is not. The body is
 not rewritten; every measurement in it is unchanged.
+
+---
+
+## EXP-0009: What Windows leaves when it deletes from exFAT
+
+**Date:** 2026-09-26
+**Milestone:** before exFAT support; informs ADR-0019
+**Related:** ADR-0002 §3.5, §5.2; EXP-0008
+
+---
+
+### Question
+
+When Windows' own exFAT driver deletes a file:
+
+1. What survives of the file's directory entry set?
+2. What survives of a fragmented file's FAT chain?
+3. What happens to the allocation bitmap?
+4. What does The Sleuth Kit recover from the result?
+
+### Why it matters
+
+`ADR-0002` §5.2 names exFAT the correct second target. §3.5 records that
+FAT32 deletion clears the cluster chain, so a deleted fragmented FAT32
+file cannot be reassembled from metadata at all. exFAT keeps allocation
+state in a bitmap rather than in the FAT (specification §5.1 and §7.1.5),
+and marks an entry deleted by clearing one bit, InUse (§6.2.1). If
+Windows leaves the chain in place, a deleted fragmented exFAT file can be
+recovered exactly, which FAT32 never allows. The Sleuth Kit's exFAT
+implementation notes say it does; nothing in this project had measured
+it.
+
+### Hypothesis
+
+Stated in the protocol before any measurement:
+
+1. P1: `CONTIG.bin`, written first to an empty volume, is contiguous and
+   its Stream Extension entry has NoFatChain = 1.
+2. P2: `FRAG.bin`, written after the volume was filled and every second
+   filler deleted, occupies at least four runs and has NoFatChain = 0.
+3. P3: deletion changes only the high bit of each EntryType in the set:
+   `85h` to `05h`, `C0h` to `40h`, `C1h` to `41h`.
+4. P4: with the InUse bits restored, each deleted set's SetChecksum is
+   valid.
+5. P5: deletion clears the file's bits in the allocation bitmap.
+6. P6: deletion leaves `FRAG.bin`'s FAT entries unchanged.
+7. P7: every file not deleted is byte-identical before and after.
+
+### Input
+
+Four target files and 300 fillers, written by
+`scripts/experiments/exp-0009-generate.py`. Every 512-byte block begins
+with a header naming its file and block index, so any cluster identifies
+itself. Output is deterministic; the targets' digests:
+
+```text
+799230d4c57749efdd2c1bf80a663062bc7323a47869e52c7122b82068a95e2e  KEEP.txt  5000
+afbc355c38682d3c1e46755da3a681fdc931129c6fc6fed3ba47eb790bd87f17  CONTIG.bin  262144
+ac61dcd74380dc95f3ca6ffbfc34725b9c47c67378c5a51282df2311da0e9f77  SMALL.txt  1000
+446a6a9ca69120765f8f541b75790a9402dd4f61da7df2e1c9d27cd487ba259f  FRAG.bin  245760
+```
+
+Two images of one 16 MiB fixed-size VHD, before deletion (A) and after
+(B). Each is 16,777,728 bytes: the disk and the 512-byte VHD footer.
+
+```text
+f9ad9b94a1ce38b45abfda1c17d78f0278e5fe5314f4556ea431439605dd545e  exp9-A.vhd
+a0ffa52069c0238f47201cea69df495a85c27ad589c1414299644339b9e4fc39  exp9-B.vhd
+```
+
+### Environment
+
+Windows 10, build 19045.6466; DiskPart 10.0.19041.3636. The images were
+read under WSL2 on the same machine. The analysis was repeated on a
+second machine, an Ubuntu container, from a transferred copy whose
+digests matched. The Sleuth Kit 4.12.1, the Ubuntu package, on both; and
+4.15.0 on the second machine, built from the official release tarball,
+`3a8c1e7d18a9b81f3e5e8aa78313974aceaafc6e051d636bc92cd7168286eca9`.
+
+### Method
+
+DiskPart created the VHD, gave it an MBR and one primary partition, and
+quick-formatted it exFAT with the default 4 KiB cluster. PowerShell
+copied `KEEP.txt`, `CONTIG.bin` and `SMALL.txt`, then fillers of 64 KiB
+until the volume was full, then deleted every even-numbered filler and
+copied `FRAG.bin` into the holes. DiskPart detached the VHD, which was
+copied as A. It was attached again, `Remove-Item` deleted `CONTIG.bin`,
+`SMALL.txt` and `FRAG.bin`, bypassing the Recycle Bin, and the detached
+VHD was copied as B.
+
+`scripts/experiments/exp-0009-analyse.py` parses both images from the
+specification: boot region with its checksum, FAT, bitmap, and every
+entry set, following each directory's chain. It scores each prediction
+from the bytes and names the structure holding every byte that differs
+between A and B. The Sleuth Kit's `fls -r -d -o 128` listed B's deleted
+files, and `icat -o 128` recovered each target; every result was compared
+by SHA-256 with the generated file.
+
+Two departures from the protocol. `SMALL.txt` was copied twice, the
+second copy overwriting the first. The fill stopped at `FILL233.bin`,
+leaving 232 fillers, of which 116 remained after the holes were punched.
+
+### Expected result
+
+As hypothesised.
+
+### Actual result
+
+The volume: partition at sector 128, 512-byte sectors, 4,096-byte
+clusters, 3,792 clusters, root directory at cluster 5, bitmap at
+cluster 2. The boot checksum is valid in both images.
+
+| | Result |
+| --- | --- |
+| P1 | True. `CONTIG.bin`: clusters 10 to 73, NoFatChain 1. |
+| P2 | True. `FRAG.bin`: four runs, clusters 3776 to 3793, 91 to 106, 123 to 138 and 155 to 164; NoFatChain 0. |
+| P3 | True. In each of the three sets only bytes 0, 32 and 64 changed, from `85 C0 C1` to `05 40 41`. |
+| P4 | True. Each deleted set's checksum is invalid as found and valid with the InUse bits restored. |
+| P5 | True. Exactly 125 bits cleared: 64, 1 and 60, the targets' clusters and no others. |
+| P6 | True. Every FAT entry of `FRAG.bin` is unchanged; its chain followed in B yields the file, SHA-256 equal to the original. |
+| P7 | True. All 118 live files other than the targets are byte-identical in A and B. |
+
+589 bytes differ between A and B:
+
+| Bytes | Structure |
+| ---: | --- |
+| 511 | Cluster 165: first sector of `System Volume Information\IndexerVolumeGuid` |
+| 48 | Directory `System Volume Information`: that file's new entry set |
+| 20 | Allocation bitmap: the 125 cleared bits and one bit set, cluster 165 |
+| 9 | Root directory: three EntryType bytes in each of three sets |
+| 1 | Main boot sector: PercentInUse, 52 to 49 |
+
+`IndexerVolumeGuid` did not exist in A. Windows created it between A and
+B, while the volume was attached for the deletion, in cluster 165, which
+was free and held data of the deleted `FILL006.bin`. Windows wrote one
+512-byte sector, 76 bytes and zero padding; the cluster's other seven
+sectors still hold `FILL006.bin`'s blocks 81 to 87.
+
+The Sleuth Kit's listing of B shows the three targets deleted, and also
+six deleted entry sets named `FILL233.bin`. The only operations on that
+name were one failed copy and the removal of its partial file.
+
+Recovery from B:
+
+| File | 4.12.1 | 4.15.0 |
+| --- | --- | --- |
+| `CONTIG.bin` | equals original | equals original |
+| `SMALL.txt` | equals original | equals original |
+| `FRAG.bin` | empty; `Invalid address in run (too large): 30592` | the same |
+
+With `-r` the result for `FRAG.bin` is the same. Both versions recover
+`FRAG.bin` correctly from A, where it is live.
+
+### Conclusion
+
+1. **On this Windows build, deletion from exFAT destroys no metadata a
+   recovery needs.** The entry set, the FAT chain and the data survive;
+   only the InUse bits, the bitmap and PercentInUse change.
+2. **A deleted fragmented file can be recovered exactly, and the
+   recovery can be checked three ways:** the entry set's checksum with
+   InUse restored, the chain's clusters all free in the bitmap, and the
+   chain's length against the recorded size. FAT32 offers none of these.
+3. **The Sleuth Kit, including its current release, does not recover
+   that file.** It reads the chain while the file is live and not once
+   it is deleted. The error names sector 30592, one past the partition's
+last sector. Sixty clusters counted contiguously from cluster 3776 would
+run past the volume's last cluster, 3793, whose last sector is 30591.
+That is consistent with treating the deleted file as contiguous. It is
+an inference from the output, not from The Sleuth Kit's source.
+4. **Attaching a volume in Windows wrote to it.** Windows created a file
+   in free space and overwrote deleted data. A tool must read a volume
+   without mounting it.
+5. **One failed copy and its removal left six deleted entry sets for
+   one file name.**
+
+### Limitations
+
+1. One Windows build, one volume size, one cluster size, one deletion
+   method. Cameras, phones, macOS and Linux delete through their own
+   drivers and were not measured.
+2. Every target was written in full, so each ValidDataLength equals its
+   DataLength. The analysis does not read ValidDataLength, and this
+   experiment says nothing about files where they differ.
+3. `FRAG.bin`'s first run ended at the volume's last cluster. Where The
+   Sleuth Kit's assumed run would fit inside the volume, what it returns
+   was not measured.
+4. `SMALL.txt` was copied twice before A was taken.
+
+### External practice
+
+The Sleuth Kit's exFAT implementation notes state that deletion does not
+clear FAT entries on exFAT, so a fragmented file can be reconstructed if
+none of its clusters were reused. This experiment confirms the statement
+for Windows 10 and finds The Sleuth Kit's own recovery does not act on it.
+
+### Next action
+
+1. ADR-0019: exFAT support, scoped by this record.
+2. Phase 2 on physical flash: whether inserting a USB stick into Windows
+   writes to it before any tool reads it.
+3. EXP-0010: a deleted fragmented file whose contiguous reading would
+   stay inside the volume, and what The Sleuth Kit returns for it.
+4. Report conclusion 3 to The Sleuth Kit's maintainers.
