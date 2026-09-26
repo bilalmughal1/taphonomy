@@ -2447,3 +2447,65 @@ for Windows 10 and finds The Sleuth Kit's own recovery does not act on it.
 3. EXP-0010: a deleted fragmented file whose contiguous reading would
    stay inside the volume, and what The Sleuth Kit returns for it.
 4. Report conclusion 3 to The Sleuth Kit's maintainers.
+
+### Appendix A: intact metadata is not proof of data (2026-09-26)
+
+After this record was committed, the recovery rule proposed for ADR-0019
+was tested against the ground truth each block carries. Conclusion 2 says
+a deleted fragmented file's recovery "can be checked three ways". Those
+checks show the metadata is intact. They do not show that the clusters
+hold the file's data, and on image B, for 19 files, they do not.
+
+**Method.** `scripts/experiments/exp-0009-overlap.py` reads, for every
+deleted entry set with data on B, the clusters its metadata records, and
+compares the file named in each block's header with the name the set
+records. Second method: The Sleuth Kit 4.15.0's `icat -o 128` recovered
+every deleted entry `fls -r -d -o 128` lists on B, 125 in all, and each
+result was compared by SHA-256 with the generated file and checked for
+content that is only zero bytes.
+
+**Result.** 119 deleted entry sets have data. One, `FILL006.bin`, fails
+the metadata checks, because cluster 165 is allocated again. Of the other
+118:
+
+| Count | Content at the recorded clusters |
+| ---: | --- |
+| 99 | The file's own data, including `FRAG.bin` by its chain |
+| 16 | Zero bytes only: `FILL200.bin` to `FILL230.bin`, even numbers |
+| 3 | `FRAG.bin`'s data: `FILL002.bin`, `FILL004.bin`, `FILL232.bin` |
+
+The Sleuth Kit agrees on every file both read. It returns the same 98
+files correctly, the same 16 as zeros, and the same three, with
+`FILL006.bin`, as another file's data. It returns nothing for `FRAG.bin`
+and for the six zero-length `FILL233.bin` sets.
+
+**The 16 zero files.** Their clusters were already zero in A. Each
+Stream Extension entry records ValidDataLength equal to DataLength,
+65,536, read by the parser and, for `FILL200.bin`, from the raw bytes; so
+the file system recorded them as fully written. They are the last even
+fillers written before the holes were punched; the other even fillers,
+deleted by the same command, kept their data. One explanation fits: their
+data was still in Windows' write cache when they were deleted and was
+never written, so the clusters kept the zeros the new VHD held. That is
+not established.
+
+**The three overwritten files.** `FRAG.bin` was created at 18:52:14; the
+files whose clusters it took, `FILL002.bin`, `FILL004.bin`, `FILL006.bin`
+and `FILL232.bin`, between 18:51:48 and 18:51:53. The Sleuth Kit's
+`istat` and the parser agree. `FILL002.bin`, `FILL004.bin` and
+`FILL006.bin` share the same second and differ only in the 10 ms field.
+
+**What each recovery rule does on B:**
+
+| Rule | Right | Wrong | Zeros | Refused |
+| --- | ---: | ---: | ---: | ---: |
+| Metadata checks only | 99 | 3 | 16 | 0 |
+| And, where deleted sets claim one cluster, only the latest created | 99 | 0 | 16 | 3 |
+| And a run of zero bytes only is refused | 99 | 0 | 0 | 19 |
+
+Conclusion 2 is to be read as: the three checks show the metadata is
+intact; they do not show the data is the file's. The other conclusions
+are unaffected. The last rule is correct on this image; it detects data
+that is only zeros, not stale data of any other kind, and its test of
+creation time can meet a tie. The body is not rewritten; every
+measurement in it is unchanged.
