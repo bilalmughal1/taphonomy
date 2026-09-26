@@ -184,15 +184,19 @@ research in [RESEARCH_LOG.md](docs/development/RESEARCH_LOG.md); changes in
 
 ## Planned
 
-Not yet implemented, in the order the evidence above suggests:
+Not yet implemented, in this order:
 
-1. FAT12 and FAT16, where ten of the fifteen deleted files in EXP-0008
+1. exFAT, the filesystem of most cards larger than 32 GB. It moved first
+   after EXP-0009 measured what Windows 10 leaves when it deletes from
+   exFAT: the entry set, and even a fragmented file's chain, survive,
+   which FAT32 never allows. ADR-0019 sets its scope and the test it must
+   pass.
+2. FAT12 and FAT16, where ten of the fifteen deleted files in EXP-0008
    were out of reach.
-2. Long file names.
-3. exFAT, the filesystem of most cards larger than 32 GB.
+3. Long file names.
 
-Each will get its own decision record, with the measurements it must meet,
-before any code.
+Each has, or will get, its own decision record, with the measurements it
+must meet, before any code.
 
 ## Contributing
 
