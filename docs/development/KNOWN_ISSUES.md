@@ -362,3 +362,23 @@ directory entry parsers read untrusted bytes, are bounds-checked, and have
 tests for the malformed inputs the fixtures and unit tests construct.
 Inputs nobody thought to construct are untested, and that is the gap
 fuzzing closes.
+
+---
+
+## Two `ParseError` variants are unreachable from the only caller
+
+`ParseError::LengthOverflow` and `ParseError::ShortSector` are both
+unreachable from `parse_mbr`'s only call site, `src/analysis.rs::run`.
+
+`ShortSector` needs a short read from `read_exact_at`, which either
+succeeds whole or fails outright and is counted as `table_unread` before
+`parse_mbr` is called.
+
+`LengthOverflow` needs `start_lba` plus `sector_count` to overflow `u64`.
+Both are `u32`, so their sum as `u64` cannot reach `u64::MAX`.
+
+`table_rejected`'s only live cause at HEAD is a missing or wrong boot
+signature.
+
+Found while drafting ADR-0014 Appendix D (2026-10-01). Not fixed, and not
+blocking.

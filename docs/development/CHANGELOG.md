@@ -7,7 +7,17 @@ history.
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- A recovered file's name now includes its partition, so two FAT32
+  partitions on one image no longer collide when an entry shares the
+  same directory cluster and slot in each.
+- A single malformed partition table entry (zero length, or claiming
+  sectors past the end of the evidence) no longer causes the entire
+  table to be refused. The entry is reported as an anomaly and counted
+  as a gap; every other entry on the table is still analysed.
+- A repeated `--output` or `--reference-digest` flag is now an argument
+  error instead of silently letting the last one given win.
 
 ## 0.1.0 - 2026-09-24
 
