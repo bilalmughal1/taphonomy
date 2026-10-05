@@ -1073,3 +1073,55 @@ no entry names it. `/gone`'s own cluster survived, and `ADR-0017`'s search
 finds it, at cluster 5, empty. `tests/orphaned_directories.rs` asserts it.
 B.2's statement was about the listing, and the listing was right; the
 directory was outside the tool's reach until M12.
+
+---
+
+## Appendix D: a partition entry can be a gap without rejecting the table (2026-10-01)
+
+`A.7`'s taxonomy of gaps, as later extended, did not have a category for
+a partition table entry that is individually malformed — zero length,
+or claiming sectors beyond the evidence — while the table itself is
+well-formed. Before this appendix, `ZeroLengthPartition` and
+`PartitionBeyondEnd` were parse errors: either one caused the whole
+table to be refused, and every partition on the image, however
+well-formed, went unanalysed.
+
+`RunCounts` gains `partitions_anomalous`: a partition entry rejected as
+malformed and not analysed, while the table's other entries were. It is
+counted in `gaps()` alongside `table_rejected` and the rest.
+
+This narrows `A.5`, it does not contradict it. `A.5`'s examples — a
+declared-type mismatch, a hidden-sectors disagreement — are findings
+about evidence that *was* analysed; the partition itself was read, and
+the anomaly is content the run observed. A dropped partition entry is
+the opposite case: its extent is never read at all, which is exactly
+what `A.7` already defines a gap to be. The two kinds of anomaly differ
+on the one fact that decides status under `A.5`'s reasoning — whether
+the evidence behind the finding was covered — so both stand.
+
+`ADR-0005` §3.3 already established the principle this corrects for:
+"conditions worth reporting rather than silently accepting," not causes
+for refusing the whole table. `ZeroLengthPartition` and
+`PartitionBeyondEnd` are now `Anomaly` variants, not `ParseError`
+variants; the malformed entry is dropped from the returned partition
+list and not analysed, every other entry is parsed and analysed
+normally, and the anomaly is reported.
+
+Two behaviours follow, both measured:
+
+* A table whose only entry is malformed (fixture
+  `partition-beyond-end.img`) still reports nothing analysed and exits
+  3 — the same outcome as before this change, now reached through
+  `partitions_anomalous` rather than a table-level refusal.
+* A table with some malformed entries beside valid ones (fixture
+  `mbr-truncated-last-partition.img`, modelling a disk image that was
+  truncated mid-acquisition) now has its valid partitions listed and
+  analysed, the malformed one reported as an anomaly and a gap, and the
+  run exits 0 with partial rather than complete coverage.
+
+`table_rejected` is unchanged and still covers what makes a table
+itself invalid: a missing signature. (`LengthOverflow` is a third
+`ParseError` variant, but `start_lba` and `sector_count` are both
+`u32`; their sum as `u64` cannot overflow, so no input reaches it. That
+appears to be unreachable at this call site, independent of this fix —
+worth a separate look, not corrected here.)
