@@ -16,6 +16,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use taphonomy::hash::hash_reader;
+
 /// `BIG.TXT`'s content digest, as recorded in `ADR-0013` section 16.1.
 const BIG_DIGEST_HEX: &str = "5ecddc870bcf7d8525574328f548af954ac1ab8d1d56555b40d01d2977a21a91";
 
@@ -371,5 +373,47 @@ fn a_directory_below_the_depth_bound_is_not_read() {
     assert!(
         summary.contains("directories not read       1"),
         "reported: {summary}"
+    );
+}
+
+/// `mkfs.vfat -R 2` declares no backup boot sector (`BPB_BkBootSec = 0`).
+/// The volume used to be refused for it, which reported `coverage none` on
+/// evidence that was entirely readable. Now it is analysed in full and its
+/// deleted file is recovered.
+///
+/// The expected digest is computed here from the bytes
+/// `fixture_fat32_no_backup_boot_sector` writes, not copied from a run.
+#[test]
+fn a_volume_with_no_backup_boot_sector_is_analysed_and_recovered() {
+    let output = run(&[&fixture("fat32-no-backup-boot-sector.img"), "--recover"]);
+
+    assert_eq!(output.status.code(), Some(0));
+
+    let text = stdout(&output);
+    assert!(!text.contains("BOOT SECTOR REJECTED"), "{text}");
+    assert!(text.contains("backup boot sector   0"), "{text}");
+
+    let mut content = Vec::new();
+    for i in 1..=40 {
+        content
+            .extend_from_slice(format!("taphonomy no backup boot sector line {i:03}\n").as_bytes());
+    }
+    let digest = hash_reader(&mut content.as_slice())
+        .expect("hashing a slice cannot fail")
+        .digest;
+    assert!(text.contains(&digest.to_string()), "{text}");
+
+    let summary = summary(&output);
+    assert!(
+        summary.contains("coverage     complete"),
+        "reported: {summary}"
+    );
+    assert!(
+        summary.contains("volumes analysed           1"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("artifacts    1 RECONSTRUCTED"),
+        "{summary}"
     );
 }

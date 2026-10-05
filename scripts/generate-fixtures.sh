@@ -752,6 +752,61 @@ fixture_fat32_recover_collision() {
 }
 
 # ---------------------------------------------------------------------------
+# A FAT32 volume that declares no backup boot sector.
+#
+#     mkfs.vfat -R 2 reserves two sectors and writes BPB_BkBootSec = 0, with
+#     BPB_FSInfo = 1. Nobody asked for that: it is what mkfs.fat 4.2 does
+#     when the reserved area has no room for a backup (measured, and so is
+#     -b 0 at the default 32 reserved sectors). Reserving two sectors also
+#     moves the first data sector, so cluster 2 is not where it is on every
+#     other fixture's volume.
+#
+#     No byte is poked. ADR-0006 section 5.1 rejects hand-built structure,
+#     and the field is the one mkfs.vfat itself wrote.
+#
+#     GONE.TXT is written first, so it takes the first clusters after the
+#     root directory's, and KEEP.TXT follows and stays live. Nothing is
+#     written after the deletion, so no slot and no cluster is reused.
+# ---------------------------------------------------------------------------
+fixture_fat32_no_backup_boot_sector() {
+    local path="$OUT_DIR/fat32-no-backup-boot-sector.img"
+    printf 'fat32-no-backup-boot-sector.img\n'
+
+    blank_image "$path"
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730017
+unit: sectors
+${path}1 : start=${PART_START}, size=$((IMAGE_SECTORS - PART_START)), type=c, bootable
+EOF
+
+    mkfs.vfat --invariant --mbr=n -F 32 -R 2 -n "$FAT32_LABEL" \
+        --offset="$PART_START" "$path" \
+        $(( (IMAGE_SECTORS - PART_START) / 2 )) >/dev/null
+
+    local work
+    work="$(mktemp -d)"
+
+    local i
+    : > "$work/gone.txt"
+    for i in $(seq 1 40); do
+        printf 'taphonomy no backup boot sector line %03d\n' "$i" >> "$work/gone.txt"
+    done
+    printf 'taphonomy no backup keep fixture\n' > "$work/keep.txt"
+
+    local img="${path}@@${VBR_OFFSET}"
+
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/gone.txt" ::/GONE.TXT
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/keep.txt" ::/KEEP.TXT
+    MTOOLS_SKIP_CHECK=1 mdel  -i "$img" ::/GONE.TXT
+
+    rm -rf "$work"
+
+    note "two reserved sectors, no backup boot sector, one deleted file"
+}
+
+# ---------------------------------------------------------------------------
 # The volume both fragmentation fixtures share.
 #
 #     FAT32 deletion zeroes the cluster chain (EXP-0003), so a deleted entry
@@ -1502,6 +1557,7 @@ fixture_fat32_deleted_entries
 fixture_fat32_deleted_residue
 fixture_fat32_recover_run
 fixture_fat32_recover_collision
+fixture_fat32_no_backup_boot_sector
 fixture_fat32_fragmented_deleted
 fixture_fat32_fragmented_live_gap
 fixture_fat32_deleted_subtree

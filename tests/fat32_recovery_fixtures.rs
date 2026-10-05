@@ -843,3 +843,114 @@ fn a_run_reaching_a_live_cluster_is_refused_without_a_poke() {
         "refused at the first cluster of the run a live file holds"
     );
 }
+
+/// The bytes `fixture_fat32_no_backup_boot_sector` writes into `GONE.TXT`.
+fn no_backup_content() -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 1..=40 {
+        out.extend_from_slice(format!("taphonomy no backup boot sector line {i:03}\n").as_bytes());
+    }
+    out
+}
+
+fn le16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+fn le32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+/// `mkfs.vfat -R 2` wrote `BPB_BkBootSec = 0` and this crate once refused
+/// the volume for it. The expected values are read from the volume's own
+/// boot sector bytes at the offsets the FAT32 specification gives, not from
+/// the parser under test, so the premises below are `mkfs.vfat`'s and not
+/// this crate's.
+#[test]
+fn a_volume_with_no_backup_boot_sector_has_the_layout_mkfs_wrote() {
+    let (mut evidence, boot, extent) = open_volume("fat32-no-backup-boot-sector.img");
+
+    let mut vbr = [0u8; VBR_SIZE];
+    evidence
+        .read_exact_at(u64::from(extent.start_lba) * SECTOR_SIZE as u64, &mut vbr)
+        .expect("reading the raw boot sector");
+
+    let reserved = le16(&vbr, 14);
+    assert_eq!(reserved, 2, "BPB_RsvdSecCnt, from `-R 2`");
+    assert_eq!(le16(&vbr, 48), 1, "BPB_FSInfo, written by mkfs.vfat");
+    assert_eq!(le16(&vbr, 50), 0, "BPB_BkBootSec, written by mkfs.vfat");
+
+    assert_eq!(boot.fs_info_sector, 1);
+    assert_eq!(boot.backup_boot_sector, 0, "the raw value is kept");
+
+    // With 32 reserved sectors the data region would start 30 sectors later,
+    // so a cluster number copied from another fixture would address the
+    // wrong bytes.
+    let fats = u32::from(vbr[16]);
+    let fat_size = le32(&vbr, 36);
+    assert_eq!(
+        boot.geometry.first_data_sector(),
+        u32::from(reserved) + fats * fat_size
+    );
+}
+
+/// The run is analysed and the file is recovered, with every expected value
+/// derived from the generator's content or from the boot sector's raw bytes.
+///
+/// `GONE.TXT` is the first file written, so it starts at the cluster after
+/// the root directory's; the root directory is one cluster. Its size and
+/// run length follow from the content the generator wrote and the cluster
+/// size the volume declares. The content is also read from the image at a
+/// byte offset computed here from the raw BPB fields, which is what makes
+/// the two-sector reserved area part of the assertion.
+#[test]
+fn a_file_is_recovered_from_a_volume_with_no_backup_boot_sector() {
+    let (mut evidence, boot, extent, entries) = entries("fat32-no-backup-boot-sector.img");
+
+    let content = no_backup_content();
+    let cluster_bytes = boot.geometry.cluster_bytes() as usize;
+    let first_cluster = boot.root_cluster + 1;
+    let (entry_cluster, entry_size) = deleted_short(&entries[1]);
+
+    assert_eq!(entry_cluster, first_cluster);
+    assert_eq!(entry_size as usize, content.len());
+
+    let Some(Assessment::Recoverable(found)) =
+        assess(&entries[1], &boot, extent, &mut evidence).expect("reading the FAT")
+    else {
+        panic!("nothing was written after the deletion: {:?}", entries[1]);
+    };
+
+    assert_eq!(found.run().first_cluster, first_cluster);
+    assert_eq!(
+        found.run().cluster_count as usize,
+        content.len().div_ceil(cluster_bytes)
+    );
+
+    let mut vbr = [0u8; VBR_SIZE];
+    let volume_start = u64::from(extent.start_lba) * SECTOR_SIZE as u64;
+    evidence
+        .read_exact_at(volume_start, &mut vbr)
+        .expect("reading the raw boot sector");
+    let first_data_sector =
+        u64::from(le16(&vbr, 14)) + u64::from(vbr[16]) * u64::from(le32(&vbr, 36));
+    let sectors_per_cluster = u64::from(vbr[13]);
+    let cluster_offset = volume_start
+        + (first_data_sector + (u64::from(first_cluster) - 2) * sectors_per_cluster)
+            * SECTOR_SIZE as u64;
+
+    let mut on_disk = vec![0u8; content.len().min(cluster_bytes)];
+    evidence
+        .read_exact_at(cluster_offset, &mut on_disk)
+        .expect("reading the first cluster");
+    assert_eq!(on_disk, content[..on_disk.len()]);
+
+    let extracted = extract(&found, &boot, extent, &mut evidence, None).expect("reading the run");
+    assert_eq!(extracted.digest, digest_of(&content));
+    assert_eq!(extracted.bytes_hashed, content.len() as u64);
+}

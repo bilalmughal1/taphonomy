@@ -38,6 +38,9 @@ pub(crate) const OFF_VOLUME_LABEL: usize = 0x47;
 /// present. Any other value means those fields carry no meaning.
 const BOOT_SIGNATURE_PRESENT: u8 = 0x29;
 
+/// `BPB_FSInfo` and `BPB_BkBootSec` value meaning "not present".
+const NO_SECTOR: u16 = 0xFFFF;
+
 /// Bit 7 of `BPB_ExtFlags`. Set means one FAT is active and the others are
 /// not maintained. Clear means all FATs are mirrored.
 const EXT_FLAGS_MIRRORING_DISABLED: u16 = 0x0080;
@@ -182,13 +185,16 @@ pub struct Fat32BootSector {
     /// Sector of the FSInfo structure, relative to the volume start.
     ///
     /// Located and bounds-checked. Its contents are not read: the free
-    /// cluster count it caches is advisory and frequently stale.
+    /// cluster count it caches is advisory and frequently stale. The raw
+    /// field: `0xFFFF` means the volume declares no FSInfo structure.
     pub fs_info_sector: u16,
     /// Sector of the backup boot record, relative to the volume start.
     ///
     /// Located and bounds-checked. Not read, and not compared against this
     /// sector. Preferring a backup over a damaged primary is a recovery
-    /// decision, not a parsing one.
+    /// decision, not a parsing one. The raw field: `0` and `0xFFFF` both mean
+    /// the volume declares no backup, and `mkfs.fat` writes `0` when the
+    /// reserved area is small.
     pub backup_boot_sector: u16,
     /// Volume serial number, if `BS_BootSig` marks it present.
     pub volume_id: Option<u32>,
@@ -292,11 +298,16 @@ pub fn parse_boot_sector(
 
     // Both structures live in the reserved region, before the first FAT.
     // A sector number outside it points at data the volume is using for
-    // something else.
+    // something else, except where the field says the structure is absent.
+    // mkfs.fat 4.2 writes BPB_BkBootSec = 0 with `-R 2` and with `-b 0`
+    // (measured), and 0xFFFF is the documented "none" for both fields.
+    // Refusing a volume for omitting an optional structure would fail closed
+    // on readable evidence. FSInfo's 0 stays refused: no formatter was
+    // observed writing it, and it is not a documented "none".
     let reserved_sectors = geometry.reserved_sectors;
 
     let fs_info_sector = le_u16(sector, OFF_FS_INFO_SECTOR);
-    if fs_info_sector == 0 || fs_info_sector >= reserved_sectors {
+    if fs_info_sector != NO_SECTOR && (fs_info_sector == 0 || fs_info_sector >= reserved_sectors) {
         return Err(Fat32Error::InvalidField {
             field: "fs_info_sector",
             value: fs_info_sector as u64,
@@ -304,7 +315,10 @@ pub fn parse_boot_sector(
     }
 
     let backup_boot_sector = le_u16(sector, OFF_BACKUP_BOOT_SECTOR);
-    if backup_boot_sector == 0 || backup_boot_sector >= reserved_sectors {
+    if backup_boot_sector != 0
+        && backup_boot_sector != NO_SECTOR
+        && backup_boot_sector >= reserved_sectors
+    {
         return Err(Fat32Error::InvalidField {
             field: "backup_boot_sector",
             value: backup_boot_sector as u64,
@@ -591,34 +605,75 @@ mod tests {
         ));
     }
 
+    fn with_fs_info(sector: u16) -> Result<Fat32BootSector, Fat32Error> {
+        let mut s = fat32_boot_sector();
+        s[OFF_FS_INFO_SECTOR..OFF_FS_INFO_SECTOR + 2].copy_from_slice(&sector.to_le_bytes());
+        parse_boot_sector(&s, FIXTURE_EXTENT)
+    }
+
+    fn with_backup(sector: u16) -> Result<Fat32BootSector, Fat32Error> {
+        let mut s = fat32_boot_sector();
+        s[OFF_BACKUP_BOOT_SECTOR..OFF_BACKUP_BOOT_SECTOR + 2]
+            .copy_from_slice(&sector.to_le_bytes());
+        parse_boot_sector(&s, FIXTURE_EXTENT)
+    }
+
     #[test]
     fn fs_info_outside_reserved_region_is_refused() {
-        let mut s = fat32_boot_sector();
-        // The fixture reserves 32 sectors.
-        s[OFF_FS_INFO_SECTOR..OFF_FS_INFO_SECTOR + 2].copy_from_slice(&100u16.to_le_bytes());
+        // The fixture reserves 32 sectors, so 32 is the first sector outside.
+        for value in [32, 100] {
+            assert!(
+                matches!(
+                    with_fs_info(value),
+                    Err(Fat32Error::InvalidField {
+                        field: "fs_info_sector",
+                        ..
+                    })
+                ),
+                "fs_info_sector {value}"
+            );
+        }
+    }
 
+    #[test]
+    fn fs_info_zero_is_still_refused() {
         assert!(matches!(
-            parse_boot_sector(&s, FIXTURE_EXTENT),
+            with_fs_info(0),
             Err(Fat32Error::InvalidField {
                 field: "fs_info_sector",
-                ..
+                value: 0
             })
         ));
     }
 
     #[test]
-    fn backup_boot_sector_outside_reserved_region_is_refused() {
-        let mut s = fat32_boot_sector();
-        s[OFF_BACKUP_BOOT_SECTOR..OFF_BACKUP_BOOT_SECTOR + 2]
-            .copy_from_slice(&100u16.to_le_bytes());
+    fn fs_info_ffff_means_no_fs_info() {
+        let boot = with_fs_info(0xFFFF).expect("0xFFFF declares no FSInfo");
+        assert_eq!(boot.fs_info_sector, 0xFFFF);
+    }
 
-        assert!(matches!(
-            parse_boot_sector(&s, FIXTURE_EXTENT),
-            Err(Fat32Error::InvalidField {
-                field: "backup_boot_sector",
-                ..
-            })
-        ));
+    #[test]
+    fn backup_boot_sector_outside_reserved_region_is_refused() {
+        for value in [32, 100] {
+            assert!(
+                matches!(
+                    with_backup(value),
+                    Err(Fat32Error::InvalidField {
+                        field: "backup_boot_sector",
+                        ..
+                    })
+                ),
+                "backup_boot_sector {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_boot_sector_zero_and_ffff_mean_no_backup() {
+        for value in [0, 0xFFFF] {
+            let boot = with_backup(value).expect("declares no backup");
+            assert_eq!(boot.backup_boot_sector, value);
+        }
     }
 
     #[test]
