@@ -301,3 +301,21 @@ recovered in its path from the long-name component before its entry, as
 its entry in the listing already was; EXP-0008 found the two disagreeing on
 a NIST image, and `3ff77f7` corrected the path. Long names are still not
 decoded.
+
+---
+
+## Appendix B: the location is unique within a partition, not across them (2026-10-01)
+
+Decision F's claim that an entry's directory cluster and slot are unique
+on the volume held only because M11 and M12 analyse one partition at a
+time. Cluster numbers restart in every FAT32 volume, so two partitions
+on the same image can each hold an entry at the same cluster and slot,
+and a recovered name built only from that pair collided between them:
+the second file was refused as already written.
+
+The name now also carries the partition: p<partition>-c<cluster>-
+s<slot>-first-<first_cluster>.bin, where <partition> is the MBR entry's
+table position, 1 to 4 (ADR-0005). Decision D's principle is unaffected
+— the name is still composed entirely from integers the run established,
+no byte of evidence reaches it, and SECURITY.md section 7 is met the
+same way, with one more fact added to the tuple that makes it unique.
