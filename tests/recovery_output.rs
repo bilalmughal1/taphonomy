@@ -28,6 +28,11 @@ const GAMMA_DIGEST_HEX: &str = "87ff853631aedb5277ccab38be53e6e8418e14d3902718a3
 const COLLISION_DIGEST_HEX: &str =
     "9c9d337b37bdea6963d8c43e1869bc9e7983d3a98f52d804e220b45057709b7d";
 
+/// The two deleted files of `fat32-two-partitions.img`, one per partition,
+/// each holding its own name and a newline.
+const FIRST_DIGEST_HEX: &str = "9ac69bddbcf6cb6733c70330a859a5a6aacb42efc56f575ab7f5e83ac7866032";
+const SECOND_DIGEST_HEX: &str = "44ae602c0b5ebbfebb838649faa967462b094199327cf46959b737807b1b7f02";
+
 /// `BIG.TXT`'s content digest, as `ADR-0013` section 16.1 records it.
 const BIG_DIGEST_HEX: &str = "5ecddc870bcf7d8525574328f548af954ac1ab8d1d56555b40d01d2977a21a91";
 
@@ -117,7 +122,7 @@ fn a_written_artifact_carries_the_digest_the_run_reported() {
 
     let big = written
         .iter()
-        .find(|path| path.ends_with("c2-s1-first-3.bin"))
+        .find(|path| path.ends_with("p1-c2-s1-first-3.bin"))
         .expect("BIG.TXT's artifact");
 
     assert_eq!(digest_of_file(big).to_string(), BIG_DIGEST_HEX);
@@ -154,7 +159,7 @@ fn a_destination_holding_the_evidence_is_refused() {
 #[test]
 fn an_existing_artifact_is_preserved_and_the_run_continues() {
     let dir = scratch("exists");
-    let taken = dir.join("c2-s1-first-3.bin");
+    let taken = dir.join("p1-c2-s1-first-3.bin");
     fs::write(&taken, b"not this tool's").expect("planting a file");
 
     let output = run(&[
@@ -178,7 +183,7 @@ fn an_existing_artifact_is_preserved_and_the_run_continues() {
 
     // The run carried on: the second entry was written, and both digests
     // were still reported.
-    assert!(dir.join("c2-s4-first-9.bin").exists(), "{text}");
+    assert!(dir.join("p1-c2-s4-first-9.bin").exists(), "{text}");
     assert!(text.contains(BIG_DIGEST_HEX), "{text}");
 }
 
@@ -198,10 +203,10 @@ fn a_written_artifact_holds_the_declared_size_without_slack() {
 
     assert!(output.status.success(), "{}", stderr(&output));
 
-    let big = fs::metadata(dir.join("c2-s1-first-3.bin")).expect("the artifact");
+    let big = fs::metadata(dir.join("p1-c2-s1-first-3.bin")).expect("the artifact");
     assert_eq!(big.len(), 1_600, "slack would make this 2048");
 
-    let small = fs::metadata(dir.join("c2-s4-first-9.bin")).expect("the artifact");
+    let small = fs::metadata(dir.join("p1-c2-s4-first-9.bin")).expect("the artifact");
     assert_eq!(small.len(), 29, "slack would make this 512");
 }
 
@@ -228,7 +233,7 @@ fn a_refused_entry_writes_no_artifact() {
 
     for path in written_files(&dir) {
         assert!(
-            !path.ends_with("c2-s2-first-4.bin"),
+            !path.ends_with("p1-c2-s2-first-4.bin"),
             "the refused entry produced a file: {}",
             path.display()
         );
@@ -256,7 +261,7 @@ fn a_fragmented_file_is_written_whole_and_is_not_the_file() {
 
     assert!(output.status.success(), "{}", stderr(&output));
 
-    let artifact = dir.join("c2-s2-first-4.bin");
+    let artifact = dir.join("p1-c2-s2-first-4.bin");
     assert!(artifact.exists(), "{}", stdout(&output));
 
     let written = digest_of_file(&artifact);
@@ -389,9 +394,40 @@ fn two_entries_at_the_same_slot_of_different_directories_are_two_files() {
 
     let written = written_files(&dir);
     assert_eq!(written.len(), 2, "wrote {written:?}");
-    for name in ["c3-s2-first-5.bin", "c4-s2-first-5.bin"] {
+    for name in ["p1-c3-s2-first-5.bin", "p1-c4-s2-first-5.bin"] {
         let path = dir.join(name);
         assert!(path.exists(), "{name} missing from {written:?}");
         assert_eq!(digest_of_file(&path).to_string(), COLLISION_DIGEST_HEX);
+    }
+}
+
+/// Two partitions, each with a deleted entry at root slot 1 naming cluster
+/// 3. Cluster numbers restart in every volume, so without the partition in
+/// the name the second artifact was reported as a file that already existed
+/// and only the first partition's content reached the destination.
+#[test]
+fn the_same_location_in_two_partitions_is_two_files() {
+    let dir = scratch("two-partitions");
+    let output = run(&[
+        &fixture("fat32-two-partitions.img"),
+        "--recover",
+        "--output",
+        dir.to_str().expect("a utf-8 scratch path"),
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let text = stdout(&output);
+    assert!(!text.contains("exists"), "{text}");
+
+    let written = written_files(&dir);
+    assert_eq!(written.len(), 2, "wrote {written:?}");
+    for (name, digest) in [
+        ("p1-c2-s1-first-3.bin", FIRST_DIGEST_HEX),
+        ("p2-c2-s1-first-3.bin", SECOND_DIGEST_HEX),
+    ] {
+        let path = dir.join(name);
+        assert!(path.exists(), "{name} missing from {written:?}");
+        assert_eq!(digest_of_file(&path).to_string(), digest);
     }
 }

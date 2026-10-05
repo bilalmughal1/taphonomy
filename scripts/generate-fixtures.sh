@@ -71,11 +71,12 @@ require tr coreutils
 
 mkdir -p "$OUT_DIR"
 
-# Writes a zero-filled image of IMAGE_SECTORS sectors.
+# Writes a zero-filled image of IMAGE_SECTORS sectors, or of the number of
+# sectors given.
 blank_image() {
-    local path="$1"
+    local path="$1" sectors="${2:-$IMAGE_SECTORS}"
     rm -f "$path"
-    dd if=/dev/zero of="$path" bs="$SECTOR" count="$IMAGE_SECTORS" \
+    dd if=/dev/zero of="$path" bs="$SECTOR" count="$sectors" \
         status=none
 }
 
@@ -1372,6 +1373,114 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# 29. Two FAT32 partitions, each holding a deleted file at the same location.
+#
+#     Cluster numbers restart in every volume, so the directory cluster and
+#     slot ADR-0016 Decision F names a written artifact from repeat across
+#     partitions. Each partition holds one deleted file at root slot 1 with
+#     first cluster 3, and the two files' contents differ, so a second
+#     artifact refused or overwritten in place of the first is visible by
+#     digest.
+#
+#     Each partition is the size of every single-partition fixture's volume,
+#     so the image is twice as large rather than each volume half as large:
+#     no volume of half that size has been measured here.
+# ---------------------------------------------------------------------------
+fixture_fat32_two_partitions() {
+    local path="$OUT_DIR/fat32-two-partitions.img"
+    printf 'fat32-two-partitions.img\n'
+
+    local span=$(( IMAGE_SECTORS - PART_START ))
+    local second=$(( PART_START + span ))
+
+    blank_image "$path" $(( PART_START + span * 2 ))
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730015
+unit: sectors
+${path}1 : start=${PART_START}, size=${span}, type=c
+${path}2 : start=${second}, size=${span}, type=c
+EOF
+
+    # The first volume prints "block count mismatch": mkfs.vfat sees the
+    # second partition's sectors after it and is told to leave them alone.
+    local start
+    for start in "$PART_START" "$second"; do
+        mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+            --offset="$start" "$path" $(( span / 2 )) >/dev/null
+    done
+
+    local work img
+    work="$(mktemp -d)"
+    printf 'FIRST.TXT\n'  > "$work/first"
+    printf 'SECOND.TXT\n' > "$work/second"
+
+    img="${path}@@${VBR_OFFSET}"
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/first" ::/FIRST.TXT
+    expect_chain "$img" ::/FIRST.TXT "::/FIRST.TXT <3>"
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/FIRST.TXT
+
+    img="${path}@@$(( second * SECTOR ))"
+    MTOOLS_SKIP_CHECK=1 mcopy -i "$img" "$work/second" ::/SECOND.TXT
+    expect_chain "$img" ::/SECOND.TXT "::/SECOND.TXT <3>"
+    MTOOLS_SKIP_CHECK=1 mdel -i "$img" ::/SECOND.TXT
+
+    rm -rf "$work"
+
+    note "two FAT32 partitions, each with a deleted file at root slot 1,"
+    note "first cluster 3"
+}
+
+# ---------------------------------------------------------------------------
+# 30. Truncated image: two whole FAT32 partitions and a third cut short.
+#
+#     The shape an image of a failing disk takes when acquisition stops
+#     early: the table is intact and its last partition runs past the end of
+#     what was read. The table is written for the whole disk and the image
+#     is then truncated half way through partition 3, so no byte of the
+#     table is poked. Partition 3 is never formatted, because nothing may
+#     read it.
+#
+#     Partitions 1 and 2 must still be listed and analysed, and partition 3
+#     reported as an anomaly and a coverage gap rather than the whole table
+#     being refused. ADR-0005 section 3.3.
+# ---------------------------------------------------------------------------
+fixture_mbr_truncated_last_partition() {
+    local path="$OUT_DIR/mbr-truncated-last-partition.img"
+    printf 'mbr-truncated-last-partition.img\n'
+
+    local span=$(( IMAGE_SECTORS - PART_START ))
+    local second=$(( PART_START + span ))
+    local third=$(( PART_START + span * 2 ))
+    local third_size=2048
+
+    blank_image "$path" $(( third + third_size ))
+
+    sfdisk --quiet --no-tell-kernel "$path" >/dev/null <<EOF
+label: dos
+label-id: 0xfa730016
+unit: sectors
+${path}1 : start=${PART_START}, size=${span}, type=c
+${path}2 : start=${second}, size=${span}, type=c
+${path}3 : start=${third}, size=${third_size}, type=c
+EOF
+
+    # Both volumes print "block count mismatch", for the reason fixture 29
+    # gives.
+    local start
+    for start in "$PART_START" "$second"; do
+        mkfs.vfat --invariant --mbr=n -F 32 -n "$FAT32_LABEL" \
+            --offset="$start" "$path" $(( span / 2 )) >/dev/null
+    done
+
+    truncate -s $(( (third + third_size / 2) * SECTOR )) "$path"
+
+    note "partitions 1 and 2 whole FAT32, partition 3 cut off half way"
+    note "by the end of the image"
+}
+
+# ---------------------------------------------------------------------------
 
 printf 'Generating fixtures in %s\n\n' "$OUT_DIR"
 
@@ -1403,6 +1512,8 @@ fixture_fat32_slot_collision
 fixture_fat32_formatted_tree
 fixture_fat32_formatted_reused
 fixture_fat32_deleted_nested
+fixture_fat32_two_partitions
+fixture_mbr_truncated_last_partition
 
 # ---------------------------------------------------------------------------
 # Manifest

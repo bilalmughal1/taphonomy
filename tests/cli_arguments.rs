@@ -252,3 +252,39 @@ fn a_listing_that_may_continue_leaves_coverage_incomplete_and_exits_zero() {
     assert!(stdout.contains("listings that may continue 1"), "{stdout}");
     assert!(!stdout.contains("directories not read"), "{stdout}");
 }
+
+/// A repeated `--output` is refused, not resolved by letting the last one
+/// win. The evidence path cannot exist, so an argument error is the proof
+/// the check runs before the evidence is opened.
+#[test]
+fn a_repeated_output_is_an_argument_error() {
+    let output = run(&[ABSENT, "--recover", "--output", "a", "--output", "b"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("--output given more than once"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// The same for `--reference-digest`, with two well-formed digests so that
+/// only the repetition can be what is refused.
+#[test]
+fn a_repeated_reference_digest_is_an_argument_error() {
+    let output = run(&[
+        ABSENT,
+        "--recover",
+        "--reference-digest",
+        BIG_DIGEST_HEX,
+        "--reference-digest",
+        WRONG_DIGEST_HEX,
+    ]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("--reference-digest given more than once"),
+        "{}",
+        stderr(&output)
+    );
+}

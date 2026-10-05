@@ -135,10 +135,11 @@ pub enum Event<'a> {
     /// The disk signature of a conventional MBR.
     DiskSignature(u32),
 
-    /// One entry of the partition table, in table order.
+    /// One partition the parsed table lists, in table order.
     PartitionListed(&'a MbrPartition),
 
-    /// Every entry of the partition table has been listed.
+    /// Every partition the parsed table lists has been listed. An entry
+    /// left out as an anomaly is not among them.
     PartitionsListed,
 
     /// A GPT protective MBR, which this tool does not analyse.
@@ -323,6 +324,10 @@ pub struct RunCounts {
     /// The partition table was read and refused.
     table_rejected: usize,
 
+    /// A partition entry rejected as malformed, zero length or beyond the
+    /// image, and not analysed. The table's other entries were.
+    partitions_anomalous: usize,
+
     /// A GPT disk, which this tool does not analyse.
     gpt: usize,
 
@@ -404,6 +409,12 @@ impl RunCounts {
     /// The partition table was read and refused.
     pub const fn table_rejected(&self) -> usize {
         self.table_rejected
+    }
+
+    /// A partition entry rejected as malformed, zero length or beyond the
+    /// image, and not analysed. The table's other entries were.
+    pub const fn partitions_anomalous(&self) -> usize {
+        self.partitions_anomalous
     }
 
     /// A GPT disk, which this tool does not analyse.
@@ -500,12 +511,14 @@ impl RunCounts {
     ///
     /// The eleven kinds `ADR-0014` Appendix B.4 enumerates, the twelfth
     /// `ADR-0015` section 9 adds, the thirteenth `ADR-0016` Decision D adds,
-    /// and the fourteenth `ADR-0017` Decision D adds. Four of them no
-    /// fixture reaches and one no fixture can, which is why the derivation
-    /// below is unit tested rather than measured alone.
+    /// the fourteenth `ADR-0017` Decision D adds, and a partition entry
+    /// dropped as malformed. Four of them no fixture reaches and one no
+    /// fixture can, which is why the derivation below is unit tested rather
+    /// than measured alone.
     const fn gaps(&self) -> usize {
         self.table_unread
             + self.table_rejected
+            + self.partitions_anomalous
             + self.gpt
             + self.partition_unread
             + self.unidentified
@@ -642,6 +655,20 @@ pub fn run<R: EvidenceReader>(
                         }
                     }
 
+                    // A dropped entry is an anomaly of the table and a gap
+                    // in the run: a partition was declared and not analysed.
+                    counts.partitions_anomalous += outcome
+                        .anomalies
+                        .iter()
+                        .filter(|a| {
+                            matches!(
+                                a,
+                                Anomaly::PartitionBeyondEnd { .. }
+                                    | Anomaly::ZeroLengthPartition { .. }
+                            )
+                        })
+                        .count();
+
                     if !outcome.anomalies.is_empty() {
                         sink.record(Event::Anomalies(&outcome.anomalies));
                     }
@@ -718,7 +745,7 @@ fn report_partition<R: EvidenceReader>(
     match parse_boot_sector(&vbr, extent) {
         Ok(boot) => {
             sink.record(Event::BootSector(&boot));
-            report_root_directory(evidence, &boot, extent, options, counts, sink);
+            report_root_directory(evidence, &boot, extent, p.index, options, counts, sink);
         }
         Err(e) => {
             sink.record(Event::BootSectorRejected(&e));
@@ -737,6 +764,7 @@ fn report_root_directory<R: EvidenceReader>(
     evidence: &mut R,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
+    partition: u8,
     options: Options<'_>,
     counts: &mut RunCounts,
     sink: &mut dyn Sink,
@@ -770,6 +798,7 @@ fn report_root_directory<R: EvidenceReader>(
         evidence,
         boot,
         extent,
+        partition,
         &root.entries,
         Listing::Walked,
         DirectoryPart::Entries,
@@ -781,6 +810,7 @@ fn report_root_directory<R: EvidenceReader>(
         evidence,
         boot,
         extent,
+        partition,
         &root.residue,
         Listing::Walked,
         DirectoryPart::Residue,
@@ -795,6 +825,7 @@ fn report_root_directory<R: EvidenceReader>(
             evidence,
             boot,
             extent,
+            partition,
             next,
             &mut seen,
             &mut pending,
@@ -805,7 +836,7 @@ fn report_root_directory<R: EvidenceReader>(
     }
 
     search_orphaned_directories(
-        evidence, boot, extent, &mut seen, &named, options, counts, sink,
+        evidence, boot, extent, partition, &mut seen, &named, options, counts, sink,
     );
 }
 
@@ -824,6 +855,7 @@ fn search_orphaned_directories<R: EvidenceReader>(
     evidence: &mut R,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
+    partition: u8,
     seen: &mut HashSet<u32>,
     named: &HashSet<u32>,
     options: Options<'_>,
@@ -914,6 +946,7 @@ fn search_orphaned_directories<R: EvidenceReader>(
             evidence,
             boot,
             extent,
+            partition,
             &directory.entries,
             Listing::Orphaned,
             DirectoryPart::Entries,
@@ -925,6 +958,7 @@ fn search_orphaned_directories<R: EvidenceReader>(
             evidence,
             boot,
             extent,
+            partition,
             &directory.residue,
             Listing::Orphaned,
             DirectoryPart::Residue,
@@ -1025,6 +1059,7 @@ fn report_subdirectory<R: EvidenceReader>(
     evidence: &mut R,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
+    partition: u8,
     next: Pending,
     seen: &mut HashSet<u32>,
     pending: &mut VecDeque<Pending>,
@@ -1122,6 +1157,7 @@ fn report_subdirectory<R: EvidenceReader>(
         evidence,
         boot,
         extent,
+        partition,
         &directory.entries,
         Listing::Walked,
         DirectoryPart::Entries,
@@ -1133,6 +1169,7 @@ fn report_subdirectory<R: EvidenceReader>(
         evidence,
         boot,
         extent,
+        partition,
         &directory.residue,
         Listing::Walked,
         DirectoryPart::Residue,
@@ -1156,6 +1193,7 @@ fn report_recovery<R: EvidenceReader>(
     evidence: &mut R,
     boot: &Fat32BootSector,
     extent: VolumeExtent,
+    partition: u8,
     entries: &[Entry],
     listing: Listing,
     part: DirectoryPart,
@@ -1235,11 +1273,12 @@ fn report_recovery<R: EvidenceReader>(
                 });
 
                 if options.recover {
-                    // `ADR-0015` Decision D. The slot and the first cluster
-                    // are facts the run established; no byte of evidence
-                    // reaches the path.
+                    // `ADR-0015` Decision D. The partition, the entry's
+                    // location and the first cluster are facts the run
+                    // established; no byte of evidence reaches the path.
                     let destination = options.output.map(|directory| Destination {
                         directory,
+                        partition,
                         cluster: entry.cluster,
                         slot: entry.slot,
                     });
@@ -1437,12 +1476,14 @@ mod tests {
     #[test]
     fn every_kind_of_gap_is_counted_as_one() {
         // The eleven kinds of Appendix B.4, the twelfth `ADR-0015` section 9
-        // adds, the thirteenth `ADR-0016` Decision D adds and the fourteenth
-        // `ADR-0017` Decision D adds. Five are unreachable from any fixture,
-        // so this is the only place they are exercised.
-        let kinds: [fn(&mut RunCounts); 14] = [
+        // adds, the thirteenth `ADR-0016` Decision D adds, the fourteenth
+        // `ADR-0017` Decision D adds, and a partition entry dropped as
+        // malformed. Five are unreachable from any fixture, so this is the
+        // only place they are exercised.
+        let kinds: [fn(&mut RunCounts); 15] = [
             |counts| counts.table_unread += 1,
             |counts| counts.table_rejected += 1,
+            |counts| counts.partitions_anomalous += 1,
             |counts| counts.gpt += 1,
             |counts| counts.partition_unread += 1,
             |counts| counts.unidentified += 1,

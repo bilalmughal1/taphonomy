@@ -100,7 +100,9 @@ pub enum PartitionTable {
     Mbr {
         /// Disk signature at offset 0x1B8.
         disk_signature: u32,
-        /// Entries with a non-zero partition type, in table order.
+        /// Entries with a non-zero partition type whose extent the evidence
+        /// holds, in table order. An entry with no sectors or reaching past
+        /// the evidence is left out and reported as an [`Anomaly`].
         partitions: Vec<MbrPartition>,
     },
     /// A GPT protective MBR.
@@ -128,6 +130,17 @@ pub enum Anomaly {
     NonZeroUnusedEntry { index: u8 },
     /// Entries are not in ascending start order.
     EntriesOutOfOrder,
+    /// A partition claims sectors beyond the end of the evidence. The entry
+    /// is left out of the table.
+    PartitionBeyondEnd {
+        index: u8,
+        start_lba: u32,
+        sector_count: u32,
+        image_sectors: u64,
+    },
+    /// A partition has a type but occupies no sectors. The entry is left
+    /// out of the table.
+    ZeroLengthPartition { index: u8, partition_type: u8 },
 }
 
 impl fmt::Display for Anomaly {
@@ -152,6 +165,23 @@ impl fmt::Display for Anomaly {
             Anomaly::EntriesOutOfOrder => {
                 f.write_str("partition entries are not in ascending start order")
             }
+            Anomaly::PartitionBeyondEnd {
+                index,
+                start_lba,
+                sector_count,
+                image_sectors,
+            } => write!(
+                f,
+                "partition {index} claims sectors {start_lba}..{} but evidence has {image_sectors} sectors",
+                *start_lba as u64 + *sector_count as u64
+            ),
+            Anomaly::ZeroLengthPartition {
+                index,
+                partition_type,
+            } => write!(
+                f,
+                "partition {index} has type {partition_type:#04x} but zero sectors"
+            ),
         }
     }
 }
@@ -163,21 +193,12 @@ pub enum ParseError {
     ShortSector { supplied: usize },
     /// The boot signature is absent or wrong.
     MissingSignature { found: [u8; 2] },
-    /// A partition claims sectors beyond the end of the evidence.
-    PartitionBeyondEnd {
-        index: u8,
-        start_lba: u32,
-        sector_count: u32,
-        image_sectors: u64,
-    },
     /// A partition's start and length overflow when added.
     LengthOverflow {
         index: u8,
         start_lba: u32,
         sector_count: u32,
     },
-    /// A partition has a type but occupies no sectors.
-    ZeroLengthPartition { index: u8, partition_type: u8 },
 }
 
 impl fmt::Display for ParseError {
@@ -192,16 +213,6 @@ impl fmt::Display for ParseError {
                 "no MBR signature at offset 0x1FE: found {:02x}{:02x}, expected 55aa",
                 found[0], found[1]
             ),
-            ParseError::PartitionBeyondEnd {
-                index,
-                start_lba,
-                sector_count,
-                image_sectors,
-            } => write!(
-                f,
-                "partition {index} claims sectors {start_lba}..{} but evidence has {image_sectors} sectors",
-                *start_lba as u64 + *sector_count as u64
-            ),
             ParseError::LengthOverflow {
                 index,
                 start_lba,
@@ -209,13 +220,6 @@ impl fmt::Display for ParseError {
             } => write!(
                 f,
                 "partition {index} length overflows: start {start_lba} plus {sector_count} sectors"
-            ),
-            ParseError::ZeroLengthPartition {
-                index,
-                partition_type,
-            } => write!(
-                f,
-                "partition {index} has type {partition_type:#04x} but zero sectors"
             ),
         }
     }
@@ -288,11 +292,17 @@ pub fn parse_mbr(sector: &[u8], image_sectors: u64) -> Result<ParseOutcome, Pars
             continue;
         }
 
+        // One malformed entry leaves the other three interpretable, and a
+        // truncated image of a failing disk cuts off the last partition in
+        // exactly this way. ADR-0005 section 3.3: an anomaly is reported,
+        // not made an error. The entry is not listed, so nothing analyses
+        // an extent the evidence does not hold.
         if sector_count == 0 {
-            return Err(ParseError::ZeroLengthPartition {
+            anomalies.push(Anomaly::ZeroLengthPartition {
                 index,
                 partition_type,
             });
+            continue;
         }
 
         let end = (start_lba as u64).checked_add(sector_count as u64).ok_or(
@@ -304,12 +314,13 @@ pub fn parse_mbr(sector: &[u8], image_sectors: u64) -> Result<ParseOutcome, Pars
         )?;
 
         if end > image_sectors {
-            return Err(ParseError::PartitionBeyondEnd {
+            anomalies.push(Anomaly::PartitionBeyondEnd {
                 index,
                 start_lba,
                 sector_count,
                 image_sectors,
             });
+            continue;
         }
 
         if boot_indicator != 0x00 && boot_indicator != 0x80 {
@@ -427,15 +438,24 @@ mod tests {
         assert_eq!(p.start_byte(), 1_048_576);
     }
 
+    /// The partitions an outcome lists.
+    fn listed(outcome: &ParseOutcome) -> &[MbrPartition] {
+        match &outcome.table {
+            PartitionTable::Mbr { partitions, .. } => partitions,
+            other => panic!("expected Mbr, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn partition_beyond_end_is_rejected() {
+    fn partition_beyond_end_is_dropped_as_an_anomaly() {
         let mut s = blank_sector();
         write_entry(&mut s, 0, 0x00, 0x0c, 2048, u32::MAX);
 
-        let err = parse_mbr(&s, 131_072).unwrap_err();
+        let outcome = parse_mbr(&s, 131_072).expect("a bad entry is not a bad table");
+        assert!(listed(&outcome).is_empty());
         assert!(matches!(
-            err,
-            ParseError::PartitionBeyondEnd { index: 1, .. }
+            outcome.anomalies.as_slice(),
+            [Anomaly::PartitionBeyondEnd { index: 1, .. }]
         ));
     }
 
@@ -447,21 +467,48 @@ mod tests {
     }
 
     #[test]
-    fn one_sector_over_is_rejected() {
+    fn one_sector_over_is_dropped_as_an_anomaly() {
         let mut s = blank_sector();
         write_entry(&mut s, 0, 0x00, 0x0c, 0, 1001);
-        let err = parse_mbr(&s, 1000).unwrap_err();
-        assert!(matches!(err, ParseError::PartitionBeyondEnd { .. }));
+        let outcome = parse_mbr(&s, 1000).expect("a bad entry is not a bad table");
+        assert!(listed(&outcome).is_empty());
+        assert!(matches!(
+            outcome.anomalies.as_slice(),
+            [Anomaly::PartitionBeyondEnd { .. }]
+        ));
     }
 
     #[test]
-    fn zero_length_partition_is_rejected() {
+    fn zero_length_partition_is_dropped_as_an_anomaly() {
         let mut s = blank_sector();
         write_entry(&mut s, 0, 0x00, 0x0c, 2048, 0);
-        let err = parse_mbr(&s, 131_072).unwrap_err();
+        let outcome = parse_mbr(&s, 131_072).expect("a bad entry is not a bad table");
+        assert!(listed(&outcome).is_empty());
         assert!(matches!(
-            err,
-            ParseError::ZeroLengthPartition { index: 1, .. }
+            outcome.anomalies.as_slice(),
+            [Anomaly::ZeroLengthPartition { index: 1, .. }]
+        ));
+    }
+
+    /// The case the change exists for: one bad entry among good ones leaves
+    /// the good ones listed, in table order.
+    #[test]
+    fn a_bad_entry_leaves_the_others_listed() {
+        let mut s = blank_sector();
+        write_entry(&mut s, 0, 0x00, 0x0c, 2048, 1000);
+        write_entry(&mut s, 1, 0x00, 0x0c, 3048, 0);
+        write_entry(&mut s, 2, 0x00, 0x0c, 4048, 1000);
+        write_entry(&mut s, 3, 0x00, 0x0c, 5048, 200_000);
+
+        let outcome = parse_mbr(&s, 131_072).expect("a bad entry is not a bad table");
+        let indices: Vec<u8> = listed(&outcome).iter().map(|p| p.index).collect();
+        assert_eq!(indices, [1, 3]);
+        assert!(matches!(
+            outcome.anomalies.as_slice(),
+            [
+                Anomaly::ZeroLengthPartition { index: 2, .. },
+                Anomaly::PartitionBeyondEnd { index: 4, .. }
+            ]
         ));
     }
 
@@ -573,6 +620,16 @@ mod tests {
             },
             Anomaly::NonZeroUnusedEntry { index: 3 },
             Anomaly::EntriesOutOfOrder,
+            Anomaly::PartitionBeyondEnd {
+                index: 1,
+                start_lba: 2048,
+                sector_count: 1000,
+                image_sectors: 2000,
+            },
+            Anomaly::ZeroLengthPartition {
+                index: 2,
+                partition_type: 0x0c,
+            },
         ];
 
         for a in &anomalies {
@@ -585,5 +642,14 @@ mod tests {
         }
 
         assert!(anomalies[0].to_string().contains("0x42"));
+        // Worded as they were when both were errors rejecting the table.
+        assert_eq!(
+            anomalies[5].to_string(),
+            "partition 1 claims sectors 2048..3048 but evidence has 2000 sectors"
+        );
+        assert_eq!(
+            anomalies[6].to_string(),
+            "partition 2 has type 0x0c but zero sectors"
+        );
     }
 }

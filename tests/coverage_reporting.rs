@@ -58,8 +58,9 @@ fn summary(output: &Output) -> String {
 
 #[test]
 fn a_run_that_analysed_nothing_says_so_and_exits_three() {
-    // Three different ways to reach it: a GPT disk, a volume whose boot
-    // sector was refused, and four partitions holding nothing identifiable.
+    // Four different ways to reach it: a GPT disk, a volume whose boot
+    // sector was refused, four partitions holding nothing identifiable, and
+    // a table whose one entry runs past the end of the image.
     // Each states its own kind, because `CLAUDE.md` section 14 requires an
     // unsupported format, unreadable metadata and an absence to be told
     // apart rather than counted together.
@@ -67,6 +68,7 @@ fn a_run_that_analysed_nothing_says_so_and_exits_three() {
         ("gpt-protective.img", "GPT not analysed           1"),
         ("fat32-bad-root-cluster.img", "boot sectors rejected      1"),
         ("mbr-four-partitions.img", "filesystems not identified 4"),
+        ("partition-beyond-end.img", "partition entries rejected 1"),
     ];
 
     for (name, gap) in cases {
@@ -82,6 +84,43 @@ fn a_run_that_analysed_nothing_says_so_and_exits_three() {
         assert!(summary.contains(gap), "{name} reported: {summary}");
         assert!(summary.contains("volumes analysed           0"));
     }
+}
+
+/// An image cut off part way through its last partition. The two whole
+/// partitions are analysed, the cut one is reported as an anomaly and counted
+/// as a gap, and a run that analysed something exits zero.
+/// ADR-0005 section 3.3.
+#[test]
+fn a_truncated_last_partition_leaves_the_others_analysed() {
+    let output = run(&[&fixture("mbr-truncated-last-partition.img")]);
+
+    assert_eq!(output.status.code(), Some(0));
+
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains("partition 1   filesystem FAT32"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("partition 2   filesystem FAT32"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("partition 3   filesystem"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "anomalies\n  partition 3 claims sectors 260096..262144 but evidence has 261120 sectors"
+        ),
+        "{stdout}"
+    );
+
+    let summary = summary(&output);
+    assert!(
+        summary.contains("coverage     incomplete"),
+        "reported: {summary}"
+    );
+    assert!(summary.contains("volumes analysed           2"));
+    assert!(summary.contains("partition entries rejected 1"));
+    assert!(!summary.contains("partition table not parsed"));
 }
 
 /// `ADR-0014` Appendix B.3. Where sector 0 cannot be read the table was

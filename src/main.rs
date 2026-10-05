@@ -61,7 +61,15 @@ fn main() -> ExitCode {
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--recover") => options.recover = true,
+            // A repeated flag is refused rather than letting the last one
+            // win: which directory or digest the operator meant is exactly
+            // the ambiguity `CLAUDE.md` section 39 says must be an error.
             Some("--output") => {
+                if output.is_some() {
+                    eprintln!("error: --output given more than once");
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                }
                 let Some(value) = args.next() else {
                     eprintln!("error: --output requires a directory");
                     eprintln!("{USAGE}");
@@ -71,6 +79,11 @@ fn main() -> ExitCode {
                 output = Some(PathBuf::from(value));
             }
             Some("--reference-digest") => {
+                if options.reference.is_some() {
+                    eprintln!("error: --reference-digest given more than once");
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                }
                 let Some(value) = args.next() else {
                     eprintln!("error: --reference-digest requires a digest");
                     eprintln!("{USAGE}");
@@ -653,6 +666,7 @@ fn print_summary(counts: &RunCounts, options: Options<'_>) {
     print_count("volumes analysed", counts.volumes_analysed());
     print_gap("partition table not read", counts.table_unread());
     print_gap("partition table not parsed", counts.table_rejected());
+    print_gap("partition entries rejected", counts.partitions_anomalous());
     print_gap("GPT not analysed", counts.gpt());
     print_gap("partitions not read", counts.partition_unread());
     print_gap("filesystems not identified", counts.unidentified());

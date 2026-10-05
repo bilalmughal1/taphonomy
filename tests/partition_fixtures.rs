@@ -136,28 +136,58 @@ fn corrupted_signature_is_rejected_despite_valid_entry() {
     assert!(matches!(err, ParseError::MissingSignature { .. }));
 }
 
-/// A partition declaring more sectors than the evidence contains must be
-/// rejected. DEVELOPMENT_ENVIRONMENT.md section 18.
+/// A partition declaring more sectors than the evidence contains is not
+/// analysed. It is reported as an anomaly and left out of the table rather
+/// than refusing the table, so the entries beside it are still read.
+/// DEVELOPMENT_ENVIRONMENT.md section 18 and ADR-0005 section 3.3.
 #[test]
-fn partition_beyond_end_of_evidence_is_rejected() {
+fn partition_beyond_end_of_evidence_is_dropped_as_an_anomaly() {
     let (sector, sectors) = first_sector("partition-beyond-end.img");
     assert_eq!(sectors, 131_072);
 
-    let err = parse_mbr(&sector, sectors).unwrap_err();
-    match err {
-        ParseError::PartitionBeyondEnd {
-            index,
-            start_lba,
-            sector_count,
-            image_sectors,
-        } => {
-            assert_eq!(index, 1);
-            assert_eq!(start_lba, 2048);
-            assert_eq!(sector_count, u32::MAX);
-            assert_eq!(image_sectors, 131_072);
-        }
-        other => panic!("expected PartitionBeyondEnd, got {other:?}"),
-    }
+    let outcome = parse_mbr(&sector, sectors).expect("a bad entry is not a bad table");
+
+    let PartitionTable::Mbr { partitions, .. } = outcome.table else {
+        panic!("expected an MBR table");
+    };
+    assert!(partitions.is_empty(), "listed {partitions:?}");
+    assert_eq!(
+        outcome.anomalies,
+        [Anomaly::PartitionBeyondEnd {
+            index: 1,
+            start_lba: 2048,
+            sector_count: u32::MAX,
+            image_sectors: 131_072,
+        }]
+    );
+}
+
+/// An image cut off part way through its last partition: the two whole
+/// partitions before it are listed, and the cut one is the anomaly.
+#[test]
+fn a_truncated_last_partition_leaves_the_others_listed() {
+    let (sector, sectors) = first_sector("mbr-truncated-last-partition.img");
+    assert_eq!(sectors, 261_120);
+
+    let outcome = parse_mbr(&sector, sectors).expect("a bad entry is not a bad table");
+
+    let PartitionTable::Mbr { partitions, .. } = outcome.table else {
+        panic!("expected an MBR table");
+    };
+    let listed: Vec<(u8, u32, u32)> = partitions
+        .iter()
+        .map(|p| (p.index, p.start_lba, p.sector_count))
+        .collect();
+    assert_eq!(listed, [(1, 2048, 129_024), (2, 131_072, 129_024)]);
+    assert_eq!(
+        outcome.anomalies,
+        [Anomaly::PartitionBeyondEnd {
+            index: 3,
+            start_lba: 260_096,
+            sector_count: 2048,
+            image_sectors: 261_120,
+        }]
+    );
 }
 
 /// A GPT disk carries a valid protective MBR. Reporting its 0xEE entry as a

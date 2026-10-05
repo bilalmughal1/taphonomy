@@ -472,6 +472,9 @@ pub struct Destination<'a> {
     /// Directory the artifact is created in.
     pub directory: &'a Path,
 
+    /// MBR entry, 1 to 4, of the partition holding the volume.
+    pub partition: u8,
+
     /// Directory cluster the entry being recovered was read from.
     pub cluster: u32,
 
@@ -485,7 +488,9 @@ impl Destination<'_> {
     /// ADR-0015 Decision D, with the location ADR-0016 Decision F adds.
     /// Composed from integers the run established, so no byte of evidence
     /// reaches the path. The entry's cluster and slot locate it uniquely on
-    /// the volume, where a slot alone repeats in every directory cluster.
+    /// the volume, where a slot alone repeats in every directory cluster,
+    /// and the partition makes that location unique on the image, because
+    /// cluster numbers restart in every volume.
     /// `SECURITY.md` section 7
     /// requires that a recovered filename never allow a write outside the
     /// destination; a name that cannot contain a separator, a `..` or a
@@ -496,8 +501,8 @@ impl Destination<'_> {
     /// of an artifact a validator has seen.
     pub fn path(&self, first_cluster: u32) -> PathBuf {
         self.directory.join(format!(
-            "c{}-s{}-first-{first_cluster}.bin",
-            self.cluster, self.slot
+            "p{}-c{}-s{}-first-{first_cluster}.bin",
+            self.partition, self.cluster, self.slot
         ))
     }
 }
@@ -1560,6 +1565,7 @@ mod tests {
         let control = scratch("read-failure-control");
         let destination = Destination {
             directory: &control,
+            partition: 1,
             cluster: 2,
             slot: 1,
         };
@@ -1575,6 +1581,7 @@ mod tests {
         let dir = scratch("read-failure");
         let destination = Destination {
             directory: &dir,
+            partition: 1,
             cluster: 2,
             slot: 1,
         };
@@ -1595,7 +1602,7 @@ mod tests {
     #[test]
     fn a_file_whose_write_had_failed_is_removed_when_the_evidence_then_fails() {
         let dir = scratch("broken-then-read");
-        let path = dir.join("c2-s1-first-4.bin");
+        let path = dir.join("p1-c2-s1-first-4.bin");
         fs::write(&path, b"truncated").expect("planting a partial file");
 
         let left = discard(
@@ -1617,7 +1624,7 @@ mod tests {
     #[test]
     fn a_file_this_run_did_not_create_is_never_removed() {
         let dir = scratch("not-ours");
-        let path = dir.join("c2-s1-first-4.bin");
+        let path = dir.join("p1-c2-s1-first-4.bin");
         fs::write(&path, b"not this tool's").expect("planting a file");
 
         let taken = discard(Sink::Taken, Some(path.as_path()));
@@ -1650,7 +1657,7 @@ mod tests {
     #[test]
     fn a_file_that_could_not_be_created_is_reported_not_created() {
         let dir = scratch("uncreatable");
-        let path = dir.join("missing").join("c2-s1-first-4.bin");
+        let path = dir.join("missing").join("p1-c2-s1-first-4.bin");
 
         let sink = open_sink(Some(&path));
         assert!(
@@ -1672,7 +1679,7 @@ mod tests {
     #[test]
     fn a_write_failure_removes_the_partial_file_and_says_so() {
         let dir = scratch("write-failure");
-        let path = dir.join("c2-s1-first-4.bin");
+        let path = dir.join("p1-c2-s1-first-4.bin");
         fs::write(&path, b"truncated").expect("planting a partial file");
 
         let output = settle(
@@ -1702,7 +1709,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = scratch("unremovable");
-        let path = dir.join("c2-s1-first-4.bin");
+        let path = dir.join("p1-c2-s1-first-4.bin");
         fs::write(&path, b"truncated").expect("planting a partial file");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))
             .expect("making the destination read-only");
@@ -1742,13 +1749,13 @@ mod tests {
 
         let error = RecoveryError::PartialLeft {
             cause: Box::new(cause),
-            path: PathBuf::from("/destination/c2-s1-first-4.bin"),
+            path: PathBuf::from("/destination/p1-c2-s1-first-4.bin"),
             removal: "Permission denied".to_string(),
         };
 
         let text = error.to_string();
         assert!(text.starts_with(&cause_text), "{text}");
-        assert!(text.contains("/destination/c2-s1-first-4.bin"), "{text}");
+        assert!(text.contains("/destination/p1-c2-s1-first-4.bin"), "{text}");
         assert!(text.contains("Permission denied"), "{text}");
 
         let source = std::error::Error::source(&error).expect("a source");

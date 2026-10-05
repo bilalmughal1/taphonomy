@@ -18,11 +18,13 @@ c69df5d9f36b2877127fd4ee472e879594bcce004fe4c344e0736a749db5b616  ./fat32-nested
 7ea4a2b1491706514d13a5ce26ea194d78e48c0100133c218f5a7cf8910335f9  ./fat32-root-entries.img
 1fbf734b72a53d0632ba8e1a80fd71a7013bd3a22410fd96ccad2f515859d3a6  ./fat32-root-multicluster.img
 f7c7fbafe2f7134a07e1af3054b07a5d422e9e267701f61d5ecfec1a5d1a052b  ./fat32-slot-collision.img
+e60b72f19d2b531d76bd7120c87883f0250ad2535d436c049fedcc4b85f2ea31  ./fat32-two-partitions.img
 7a75c446ece747aa657e1b6f86fe2dbaeb66ed4a64c0abc8aa4e69d6c127f08b  ./fat32-undersized-fat.img
 95f5fb4964f0d9a59b703990337850378f05e44e6eda8e2c1b1ab2f1f6e70e19  ./gpt-protective.img
 cd80ded1e925565e17e8b5c3c13f36ab46dd547e746fd0e270683494c15b40e4  ./mbr-empty.img
 a0f089eb175c249aaf28cca55901544cf4e99c8f00efce735228ac2bfe7009ab  ./mbr-four-partitions.img
 8a4eefea99bfad7dd669ec4d9f0aad95b6f1f6de5c1f70fd0f2b3fd991280280  ./mbr-single-fat32.img
+6b4a43e9e7e158ab82cfb898c575e3f6c55360729a261ab2c2abaf8d8d9d506b  ./mbr-truncated-last-partition.img
 0191107abba6dee29167f5ab527acc0d3e488f9a8d292c0d156308e3424f8cd8  ./mbr-type-mismatch.img
 3b6a07d0d404fab4e23b6d34bc6696a6a312dd92821332385e5af7c01c421351  ./no-signature.img
 703233f7d4df1e2cf85714ab9f6097074c8b40cab33d72c6a2bb6b79cf2a6d74  ./partition-beyond-end.img
