@@ -616,3 +616,37 @@ and no attempt was made to derive the alternative before asserting it.
 The general form: a negative claim about what cannot be recovered is a
 stronger claim than a positive one about what can, and warrants more work
 before it is written down, not less. §5.3 states its negative claim in bold.
+
+---
+
+## Appendix D: a volume may declare no FSInfo or backup boot sector (2026-10-06)
+
+§5.2's precedent table says the FSInfo sector and the backup boot sector
+are "bounds-checked". `parse_boot_sector` read that as refusing a volume
+whose `BPB_BkBootSec` was `0` or whose `BPB_FSInfo` was `0`, and
+refusing any value at or beyond the reserved region, `0xFFFF` included.
+Nothing in this crate reads either structure, so the refusal protected
+nothing and cost a readable volume.
+
+Measured: `mkfs.fat` 4.2 writes `BPB_BkBootSec = 0` when the reserved
+area is small (`-R 2` gave reserved sectors 2, FSInfo 1, backup 0) and
+when asked (`-b 0` gave 32, 1, 0). The binary refused both images with
+`invalid FAT32 field backup_boot_sector: 0`, `coverage none`, exit 3.
+The two specification sources disagree on how "none" is encoded for the
+backup field: fatgen103 says "if non-zero", which implies `0`, while
+Microsoft's BPB (FAT32) documentation, as copied by active-undelete.com,
+and Brouwer's Linux notes give `0xFFFF`. The change therefore accepts
+both.
+
+`backup_boot_sector` of `0` or `0xFFFF` now means no backup, and
+`fs_info_sector` of `0xFFFF` means no FSInfo. Any other value at or
+beyond `reserved_sectors` is still refused. `fs_info_sector` of `0` is
+still refused: no formatter was observed writing it and fatgen103 is
+silent on it. The `FSInfo` `0xFFFF` case rests on the Microsoft
+documentation alone, and neither `0xFFFF` case has been measured on a
+real volume; both have unit tests only. The fields keep the raw value,
+so the CLI prints `0` or `65535` rather than a word.
+
+The measured case is `fat32-no-backup-boot-sector.img`, built with
+`mkfs.vfat -R 2` and no poked byte. It is analysed in full and its
+deleted file is recovered.

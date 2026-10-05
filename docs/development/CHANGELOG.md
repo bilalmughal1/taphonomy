@@ -18,6 +18,11 @@ history.
   as a gap; every other entry on the table is still analysed.
 - A repeated `--output` or `--reference-digest` flag is now an argument
   error instead of silently letting the last one given win.
+- A FAT32 volume that declares no backup boot sector (`BPB_BkBootSec`
+  of `0` or `0xFFFF`) or no FSInfo sector (`BPB_FSInfo` of `0xFFFF`) is
+  no longer refused. `mkfs.fat` writes `0` for the backup when the
+  reserved area is small, so such volumes were reported as `coverage
+  none` although they were entirely readable.
 
 ## 0.1.0 - 2026-09-24
 
