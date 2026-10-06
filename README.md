@@ -71,7 +71,7 @@ one on first build. The test fixtures are built from ordinary filesystem
 tools:
 
 ```sh
-sudo apt install fdisk gdisk dosfstools mtools
+sudo apt install fdisk gdisk dosfstools mtools xz-utils
 git clone https://github.com/bilalmughal1/taphonomy
 cd taphonomy
 cargo build --release

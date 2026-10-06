@@ -17,6 +17,7 @@
 #   minfo, mshowfat         mtools
 #   od, sha256sum           coreutils
 #   truncate, tr            coreutils
+#   xz                      xz-utils
 #
 # No root privileges are required. No loop devices are used. No filesystem is
 # mounted. Every image is a regular file.
@@ -68,6 +69,9 @@ require sha256sum coreutils
 require od coreutils
 require truncate coreutils
 require tr coreutils
+# Expands the committed exFAT images below. They are the one input here that
+# no tool in this repository builds.
+require xz xz-utils
 
 mkdir -p "$OUT_DIR"
 
@@ -1572,6 +1576,24 @@ fixture_fat32_two_partitions
 fixture_mbr_truncated_last_partition
 
 # ---------------------------------------------------------------------------
+# The two exFAT images EXP-0009 measured.
+#
+# Windows made them, and nothing in this repository can regenerate them, so
+# unlike every fixture above they are committed, compressed, under
+# fixtures/exfat. They are expanded here byte for byte; no byte is poked.
+# Their digests are in the manifest below, which is what ties the expanded
+# image to the one the experiment measured.
+# ---------------------------------------------------------------------------
+EXFAT_DIR="$(dirname "${BASH_SOURCE[0]}")/../fixtures/exfat"
+readonly EXFAT_DIR
+
+for name in exp9-A exp9-B; do
+    printf '%s.vhd\n' "$name"
+    xz -dc "$EXFAT_DIR/$name.vhd.xz" > "$OUT_DIR/$name.vhd"
+    note "expanded from fixtures/exfat/$name.vhd.xz"
+done
+
+# ---------------------------------------------------------------------------
 # Manifest
 #
 # Records the SHA-256 of every fixture. A fixture whose digest changes has
@@ -1580,7 +1602,7 @@ fixture_mbr_truncated_last_partition
 # ---------------------------------------------------------------------------
 
 MANIFEST="$OUT_DIR/MANIFEST.sha256"
-( cd "$OUT_DIR" && sha256sum ./*.img > "$(basename "$MANIFEST")" )
+( cd "$OUT_DIR" && sha256sum ./*.img ./*.vhd > "$(basename "$MANIFEST")" )
 
 printf '\nManifest written to %s\n' "$MANIFEST"
 printf '\n'

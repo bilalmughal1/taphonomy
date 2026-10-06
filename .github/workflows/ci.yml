@@ -27,7 +27,7 @@ jobs:
       - name: Install the fixture tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes fdisk gdisk dosfstools mtools
+          sudo apt-get install --yes fdisk gdisk dosfstools mtools xz-utils
 
       - name: Record the fixture tool versions
         run: dpkg-query -W fdisk gdisk dosfstools mtools util-linux
