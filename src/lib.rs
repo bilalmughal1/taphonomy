@@ -59,6 +59,7 @@ pub mod analysis;
 pub mod confidence;
 pub mod error;
 pub mod evidence;
+pub mod exfat_boot;
 pub mod extraction;
 pub mod fat;
 pub mod fat32;
