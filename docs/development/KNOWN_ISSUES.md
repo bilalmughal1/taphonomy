@@ -382,3 +382,17 @@ signature.
 
 Found while drafting ADR-0014 Appendix D (2026-10-01). Not fixed, and not
 blocking.
+
+---
+
+## The two removal paths disagree about a file that is already gone
+
+In `src/extraction.rs`, `remove_partial`, used when the evidence fails
+part way through, treats a file that is already gone as removed. The
+`Broken` and failed-flush arms of `settle` use
+`fs::remove_file(..).is_ok()`, so a file already gone is reported as
+`Failed { removed: false }`. Reached only if the file disappears between
+its creation and its removal; no test or fixture reaches it.
+
+Found while moving the code in M13 (`ADR-0020` Decision E) and preserved
+exactly. Not fixed.

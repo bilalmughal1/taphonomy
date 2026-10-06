@@ -24,6 +24,15 @@ history.
   reserved area is small, so such volumes were reported as `coverage
   none` although they were entirely readable.
 
+### Changed
+
+- The code that hashes and writes a recovered artifact moved from
+  `taphonomy::fat_recovery` to the new public module
+  `taphonomy::extraction`. `Destination`, `Extraction` and `Output` are
+  still re-exported from `fat_recovery`, so existing paths keep working.
+- The read-back of a written artifact reads in 64 KiB chunks and not in
+  cluster-sized ones. What is written, hashed and reported is unchanged.
+
 ## 0.1.0 - 2026-09-24
 
 ### Added

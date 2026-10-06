@@ -1163,7 +1163,7 @@ it remains intent. `ADR-0011` Decision A defines the distinction.
 | --- | --- |
 | 5.2 Evidence Management | `src/evidence.rs` opens evidence read-only; `src/hash.rs` computes SHA-256 (`ADR-0004`) |
 | 5.4 Analysis | `src/partition.rs` (MBR, `ADR-0005`), `src/filesystem.rs`, `src/fat.rs`, `src/fat32.rs`, `src/fat_directory.rs` |
-| 5.5 Recovery | `src/fat_recovery.rs` (`ADR-0010`, `ADR-0015`) |
+| 5.5 Recovery | `src/fat_recovery.rs` assesses and reads a deleted file (`ADR-0010`); `src/extraction.rs` hashes and writes the artifact (`ADR-0015`, `ADR-0020`) |
 | 15 Evidence Boundary | `EvidenceFile`; asserted by `tests/read_only.rs` |
 | 16 Reader Abstraction | The `EvidenceReader` trait, `read_exact_at` (`ADR-0007`) |
 | 18 Output Boundary | A destination holding the evidence is refused; each artifact is read back after writing (`ADR-0015`) |
@@ -1193,11 +1193,12 @@ interfaces, external tools, plugins, databases, web and desktop; 37
 Observability; 41 Versioning; 42 Compatibility.
 
 **Invariants.** 1, 2 and 6 hold for the reasons in the tables above. 5
-holds: recovery is `src/fat_recovery.rs` and comparison against a reference
-is `src/validation.rs`. 10 holds: every capability has a decision record in
-`docs/decisions`. 3 and 9 hold for the library. 4 has nothing to act on
-yet, since there is no acquisition. 7 holds as far as parsing is
-bounds-checked; no fuzz testing exists (`SECURITY.md` section 36).
+holds: recovery is `src/fat_recovery.rs` and `src/extraction.rs`, and
+comparison against a reference is `src/validation.rs`. 10 holds: every
+capability has a decision record in `docs/decisions`. 3 and 9 hold for the
+library. 4 has nothing to act on yet, since there is no acquisition. 7 holds
+as far as parsing is bounds-checked; no fuzz testing exists (`SECURITY.md`
+section 36).
 
 **Invariant 8 holds.** `ADR-0018`. The partition loop, the directory walk,
 the orphan search and the run's counts are `src/analysis.rs`, called from
