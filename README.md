@@ -168,8 +168,11 @@ failure, not a partial success. The project is organised around that.
 * **Reproducible evidence.** Every test image is generated from ordinary
   filesystem tools by `scripts/generate-fixtures.sh`, byte-identical on
   every build, with its digest committed in
-  `fixtures/partition/MANIFEST.sha256`. No real personal evidence is ever
-  committed.
+  `fixtures/partition/MANIFEST.sha256`. The exception is two exFAT
+  images that Windows made, which no tool here can regenerate: they are
+  committed compressed in `fixtures/exfat/`, expanded by the same script
+  and checked against the digests EXP-0009 recorded. They hold only
+  synthetic files. No real personal evidence is ever committed.
 * **Tested boundaries.** Read-only access, bounds checks on what is
   parsed, each refusal, and every kind of coverage gap have tests.
 

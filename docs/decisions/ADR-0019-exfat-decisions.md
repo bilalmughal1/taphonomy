@@ -135,3 +135,42 @@ deleted-file-recovery images measured, as EXP-0008 did for FAT.
 * **Distribution in a paid product.** The engine is published under
   `ADR-0012`. Whether a commercial product may include exFAT support
   awaits a patent opinion; it does not affect the engine.
+
+---
+
+## Appendix A: how tests get exFAT volumes (2026-10-06)
+
+§7 left open how tests get exFAT volumes and whether EXP-0009's images
+become test inputs. They do. `exp9-A.vhd` and `exp9-B.vhd` are the
+inputs for §6, and nothing else can stand in for image B. Every number
+in §6's first item is a property of the volume as Windows wrote it,
+including `IndexerVolumeGuid`, which Windows created in a free cluster
+of the deleted `FILL006.bin` between A and B. No tool this project can
+run in CI produces that.
+
+Two alternatives were measured. `exfat-fuse` 1.4.0 wrote a four-run file
+with NoFatChain 0, and on deletion zeroed all 50 of its FAT entries (0
+unchanged), where EXP-0009 P6 found Windows leaves them. A volume
+deleted through that driver cannot stand in for B. The Linux kernel
+driver was not run; reading `fs/exfat/fatent.c`, freeing a chain clears
+bitmap bits and writes no FAT entry, which is a reading and not a
+measurement. `mkfs.exfat` 1.2.2 is not reproducible: two runs three
+seconds apart differed in 262 bytes, all traced to `VolumeSerialNumber`
+at offset 100 of the boot sector and the boot checksum it feeds, and the
+tool has no flag to set it. A regenerable exFAT fixture set therefore
+stays undecided and is not needed for §6.
+
+The images are committed as `fixtures/exfat/exp9-A.vhd.xz` and
+`exp9-B.vhd.xz`, expanded by `scripts/generate-fixtures.sh`, and pinned
+in `MANIFEST.sha256` by the digests EXP-0009 recorded, so CI checks
+that the committed bytes are the measured ones. They are the first
+committed binary test inputs; the README's statement that every test
+image is generated from ordinary filesystem tools now carries this
+exception. With `xz -9e` the two archives are 26,948 and 27,036 bytes,
+53,984 in all, which is §7's 54 KB. Both expanded digests were checked
+equal to EXP-0009's. A search of both images for the author's username,
+machine name and `c:\users`, in 8-bit and UTF-16, found nothing; the
+text remaining in image B is boot code, directory names, `BOOTMGR`, the
+`System Volume Information` files and one volume GUID. The entries'
+timestamps and UTC offset and the VHD footer's creation time were not
+examined.
