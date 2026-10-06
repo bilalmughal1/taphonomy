@@ -43,19 +43,19 @@
 //! destination.
 
 use std::fmt;
-use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::error::Error;
 use crate::evidence::EvidenceReader;
+use crate::extraction::{ArtifactWriter, Leftover};
 use crate::fat::FIRST_DATA_CLUSTER;
 use crate::fat_directory::{
     DeletedKind, DirectoryError, Entry, EntryKind, cluster_offset, read_fat_entry,
 };
 use crate::fat32::Fat32BootSector;
 use crate::filesystem::VolumeExtent;
-use crate::hash::{Sha256Digest, Sha256Hasher};
+
+pub use crate::extraction::{Destination, Extraction, Output};
 
 /// The run of clusters a deleted entry implies for its content.
 ///
@@ -461,180 +461,6 @@ pub fn assess_listed<R: EvidenceReader>(
     Ok(Some(Assessment::Recoverable(UnallocatedRun(run))))
 }
 
-/// Where an extracted artifact is to be written.
-///
-/// The directory is the caller's, and ADR-0015 Decision B as its Appendix
-/// A.3 corrects it requires the caller to have established, before the
-/// evidence was opened, that the directory is not the one holding the
-/// evidence. Sharing a filesystem with an image file is permitted.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Destination<'a> {
-    /// Directory the artifact is created in.
-    pub directory: &'a Path,
-
-    /// MBR entry, 1 to 4, of the partition holding the volume.
-    pub partition: u8,
-
-    /// Directory cluster the entry being recovered was read from.
-    pub cluster: u32,
-
-    /// Slot of that entry within its directory cluster, counting from zero.
-    pub slot: usize,
-}
-
-impl Destination<'_> {
-    /// The path this artifact is written to.
-    ///
-    /// ADR-0015 Decision D, with the location ADR-0016 Decision F adds.
-    /// Composed from integers the run established, so no byte of evidence
-    /// reaches the path. The entry's cluster and slot locate it uniquely on
-    /// the volume, where a slot alone repeats in every directory cluster,
-    /// and the partition makes that location unique on the image, because
-    /// cluster numbers restart in every volume.
-    /// `SECURITY.md` section 7
-    /// requires that a recovered filename never allow a write outside the
-    /// destination; a name that cannot contain a separator, a `..` or a
-    /// leading `/` has no such failure to get wrong.
-    ///
-    /// The extension states that the content was not identified. No
-    /// validator exists, and ADR-0003 section 3.1 makes a level a property
-    /// of an artifact a validator has seen.
-    pub fn path(&self, first_cluster: u32) -> PathBuf {
-        self.directory.join(format!(
-            "p{}-c{}-s{}-first-{first_cluster}.bin",
-            self.partition, self.cluster, self.slot
-        ))
-    }
-}
-
-/// What became of an artifact the caller asked to be written.
-///
-/// Every variant is a statement about the destination. A read failure in
-/// the evidence never reaches here; it is returned as an error.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Output {
-    /// Written, then read back and hashed.
-    ///
-    /// `readback` is the digest of the file on disk, not of what was sent
-    /// to the kernel. ADR-0015 Decision H leaves the comparison against
-    /// [`Extraction::digest`] to the caller to report: a difference is a
-    /// finding about the destination, not an error here.
-    Written {
-        /// Path written.
-        path: PathBuf,
-        /// Digest of the bytes read back from that path.
-        readback: Sha256Digest,
-    },
-
-    /// Written and flushed, and the file could not be read back.
-    ///
-    /// The file is left in place. Every write and the flush succeeded, so
-    /// it may be sound, and removing a possibly-recovered artifact because
-    /// the destination could not be re-read would destroy more than it
-    /// protects. A failed flush is not this case; it is [`Output::Failed`].
-    /// ADR-0015 section 10 does not cover this case and is owed an appendix
-    /// recording it.
-    Unverified {
-        /// Path written.
-        path: PathBuf,
-        /// Why the read back failed.
-        message: String,
-    },
-
-    /// A file of that name existed already and was not touched.
-    ///
-    /// ADR-0015 Decision C, which `SAFETY.md` section 15 requires: the
-    /// default behaviour preserves existing output.
-    Exists {
-        /// Path that was left alone.
-        path: PathBuf,
-    },
-
-    /// The file could not be created, so nothing was written.
-    ///
-    /// Distinct from [`Output::Failed`] because nothing reached the
-    /// destination and nothing is left to remove. `CLAUDE.md` section 14
-    /// requires a permission failure to be told apart from an I/O failure,
-    /// and an unwritable directory is the ordinary cause of this one.
-    NotCreated {
-        /// Path that was attempted.
-        path: PathBuf,
-        /// Why it could not be created.
-        message: String,
-    },
-
-    /// The file was created, and a write or the flush failed.
-    ///
-    /// ADR-0015 Decision G: the partial file is removed, because a
-    /// truncated file on disk cannot be told apart from a short file that
-    /// was recovered whole, and `SAFETY.md` section 12 forbids a failure
-    /// becoming a silent partial success. A failed flush counts: after a
-    /// writeback error the kernel may already have discarded the pages, so
-    /// the file cannot be taken to hold what was written.
-    Failed {
-        /// Path that was attempted.
-        path: PathBuf,
-        /// Why it failed.
-        message: String,
-        /// Whether the partial file was successfully removed.
-        ///
-        /// Reported rather than assumed. A removal can fail too, and the
-        /// tool states what it knows rather than claiming a cleanliness it
-        /// did not achieve.
-        removed: bool,
-    },
-}
-
-/// The result of reading a run's content.
-///
-/// The content is not here. Extraction hashes what it read and reports;
-/// where a [`Destination`] was supplied the bytes also went to a file, and
-/// `output` says what became of it.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Extraction {
-    /// Digest of the file's bytes, and of nothing else.
-    pub digest: Sha256Digest,
-
-    /// Number of bytes hashed, counted by the hasher rather than assumed.
-    ///
-    /// Equal to the size the entry declared. It is reported so that the
-    /// digest is never separated from a statement of what it covers.
-    pub bytes_hashed: u64,
-
-    /// Bytes of the final cluster that were read and not hashed.
-    ///
-    /// File slack. It belongs to whatever held the cluster before this file
-    /// and is evidence in its own right, so its size is reported rather
-    /// than silently dropped. Recovering it is a separate capability and is
-    /// not this milestone's.
-    pub slack_bytes: u32,
-
-    /// What became of the written file, where one was asked for.
-    ///
-    /// `None` when the caller supplied no [`Destination`], which is the
-    /// default invocation and the only behaviour before M10.
-    pub output: Option<Output>,
-}
-
-/// Where the bytes are going while a run is streamed.
-///
-/// Private. It exists so the loop has one thing to write to whether or not
-/// a file was opened, and so a destination failure part way through stops
-/// writing without stopping the hashing.
-enum Sink {
-    /// No destination was asked for.
-    Absent,
-    /// Open and being written.
-    Open(fs::File),
-    /// The path was taken; nothing was opened.
-    Taken,
-    /// Creating the file failed, with the reason. Nothing is on disk.
-    Unopened(String),
-    /// The file was created and a write failed, with the reason. A partial
-    /// file is on disk and must be removed.
-    Broken(String),
-}
-
 /// Reads a run's content and returns a digest of it.
 ///
 /// Requires an [`UnallocatedRun`], which only [`assess`] produces and only
@@ -667,66 +493,27 @@ pub fn extract<R: EvidenceReader>(
     let run = found.run();
     let cluster_bytes = boot.geometry.cluster_bytes() as usize;
 
-    let path = destination.map(|d| d.path(run.first_cluster));
-    let mut sink = open_sink(path.as_deref());
+    let mut writer = ArtifactWriter::begin(destination.map(|d| d.path(run.first_cluster)));
 
     // One buffer for the whole run. `file_size` is never allocated.
     let mut buffer = vec![0u8; cluster_bytes];
-    let mut hasher = Sha256Hasher::new();
 
-    let read = stream(
-        found,
-        boot,
-        extent,
-        reader,
-        &mut buffer,
-        &mut hasher,
-        &mut sink,
-    );
-
-    if let Err(e) = read {
+    if let Err(e) = stream(found, boot, extent, reader, &mut buffer, &mut writer) {
         // ADR-0015 Decision G. The evidence failed, so there is no digest
         // to report and nothing may be left behind that looks like one.
         // Where something is left behind anyway, section 9 requires both
         // failures to be reported.
-        return Err(match (discard(sink, path.as_deref()), path) {
-            (Some(removal), Some(path)) => RecoveryError::PartialLeft {
+        return Err(match writer.abort() {
+            Some(Leftover { path, removal }) => RecoveryError::PartialLeft {
                 cause: Box::new(e),
                 path,
                 removal,
             },
-            _ => e,
+            None => e,
         });
     }
 
-    let hashed = hasher.finish();
-
-    Ok(Extraction {
-        digest: hashed.digest,
-        bytes_hashed: hashed.bytes_read,
-        slack_bytes: run.slack_bytes,
-        output: settle(sink, path, &mut buffer),
-    })
-}
-
-/// Opens the destination, if one was asked for.
-///
-/// `create_new` makes the existence check and the creation one operation,
-/// so nothing can appear between them. ADR-0015 Decision C.
-fn open_sink(path: Option<&Path>) -> Sink {
-    let Some(path) = path else {
-        return Sink::Absent;
-    };
-
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(file) => Sink::Open(file),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Sink::Taken,
-        Err(e) => Sink::Unopened(e.to_string()),
-    }
+    Ok(writer.finish(run.slack_bytes))
 }
 
 /// Reads the run, hashing every byte and writing those the file declares.
@@ -739,8 +526,7 @@ fn stream<R: EvidenceReader>(
     extent: VolumeExtent,
     reader: &mut R,
     buffer: &mut [u8],
-    hasher: &mut Sha256Hasher,
-    sink: &mut Sink,
+    writer: &mut ArtifactWriter,
 ) -> Result<(), RecoveryError> {
     let run = found.run();
     let cluster_bytes = buffer.len();
@@ -754,128 +540,20 @@ fn stream<R: EvidenceReader>(
         // Every earlier one contributes all of them, because the run length
         // was computed from the same size.
         let take = remaining.min(cluster_bytes as u64) as usize;
-        hasher.update(&buffer[..take]);
+        writer.push(&buffer[..take]);
         remaining -= take as u64;
-
-        // The same slice, in the same pass. A write failure stops the
-        // writing and not the hashing: the digest is a fact about the
-        // evidence and the destination has no say in it.
-        if let Sink::Open(file) = sink
-            && let Err(e) = file.write_all(&buffer[..take])
-        {
-            *sink = Sink::Broken(e.to_string());
-        }
     }
 
     Ok(())
-}
-
-/// Removes a partial file after the evidence failed, and says why not
-/// where it could not.
-///
-/// Both sinks that created a file are removed. A write that failed before
-/// the read did leaves a truncated file just as surely as an open one, and
-/// ADR-0015 Decision G removes the file on any error after it is created.
-/// Section 9 also requires that a failed removal be reported beside the
-/// evidence failure, so its reason is returned for the caller to carry.
-fn discard(sink: Sink, path: Option<&Path>) -> Option<String> {
-    let path = path?;
-
-    match sink {
-        Sink::Open(file) => {
-            // Closed before removal, so the file is not held open on
-            // platforms that care.
-            drop(file);
-            remove_partial(path)
-        }
-        Sink::Broken(_) => remove_partial(path),
-        Sink::Absent | Sink::Taken | Sink::Unopened(_) => None,
-    }
-}
-
-/// Removes a file this run created, returning why it remains if it does.
-///
-/// A file already gone is not a failure: nothing is left behind, which is
-/// what the removal was for.
-fn remove_partial(path: &Path) -> Option<String> {
-    match fs::remove_file(path) {
-        Ok(()) => None,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => Some(e.to_string()),
-    }
-}
-
-/// Closes the file and states what became of it.
-fn settle(sink: Sink, path: Option<PathBuf>, buffer: &mut [u8]) -> Option<Output> {
-    let path = path?;
-
-    match sink {
-        Sink::Absent => None,
-        Sink::Taken => Some(Output::Exists { path }),
-        Sink::Unopened(message) => Some(Output::NotCreated { path, message }),
-        Sink::Broken(message) => {
-            let removed = fs::remove_file(&path).is_ok();
-            Some(Output::Failed {
-                path,
-                message,
-                removed,
-            })
-        }
-        Sink::Open(file) => {
-            // Flushed before it is read back, because dropping a file
-            // ignores the errors closing it can report, and `sync_all` is
-            // where they surface. Closed before it is read back, so what is
-            // hashed is what the filesystem holds rather than what a buffer
-            // still owes it.
-            let flushed = file.sync_all();
-            drop(file);
-
-            // A failed flush is a failed write. ADR-0015 Decision G.
-            if let Err(e) = flushed {
-                let removed = fs::remove_file(&path).is_ok();
-                return Some(Output::Failed {
-                    path,
-                    message: e.to_string(),
-                    removed,
-                });
-            }
-
-            // ADR-0015 Decision H. Hashing during the write proves what was
-            // handed to the kernel; this proves what landed.
-            match read_back(&path, buffer) {
-                Ok(readback) => Some(Output::Written { path, readback }),
-                Err(e) => Some(Output::Unverified {
-                    path,
-                    message: e.to_string(),
-                }),
-            }
-        }
-    }
-}
-
-/// Hashes a written file, reusing the run's buffer.
-fn read_back(path: &Path, buffer: &mut [u8]) -> io::Result<Sha256Digest> {
-    use std::io::Read;
-
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256Hasher::new();
-
-    loop {
-        let read = file.read(buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-
-    Ok(hasher.finish().digest)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::evidence::tests::MemoryImage;
+    use crate::extraction::tests::scratch;
     use crate::fat_directory::NAME_LEN;
+    use crate::hash::Sha256Digest;
 
     const START_LBA: u32 = 2048;
     const TOTAL_SECTORS: u32 = 129_024;
@@ -1540,16 +1218,6 @@ mod tests {
         );
     }
 
-    /// An empty directory of this test's own under the system temporary
-    /// directory, removed first so a previous run cannot decide this one.
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("taphonomy-unit-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("creating the scratch directory");
-        dir
-    }
-
     /// ADR-0015 Decision G. The evidence fails on the second cluster, after
     /// the first has been written, and no truncated file may remain.
     ///
@@ -1595,142 +1263,6 @@ mod tests {
             !destination.path(4).exists(),
             "a partial file was left after the evidence failed"
         );
-    }
-
-    /// ADR-0015 Decision G. A write that failed earlier left a file behind,
-    /// and a later evidence failure must remove it too.
-    #[test]
-    fn a_file_whose_write_had_failed_is_removed_when_the_evidence_then_fails() {
-        let dir = scratch("broken-then-read");
-        let path = dir.join("p1-c2-s1-first-4.bin");
-        fs::write(&path, b"truncated").expect("planting a partial file");
-
-        let left = discard(
-            Sink::Broken("no space left".to_string()),
-            Some(path.as_path()),
-        );
-
-        assert!(!path.exists(), "the partial file survived");
-        assert!(
-            left.is_none(),
-            "a removal that succeeded was reported: {left:?}"
-        );
-    }
-
-    /// A file of that name that this run did not create is not this run's
-    /// to remove, whichever way the run failed.
-    ///
-    /// ADR-0015 Decision C and `SAFETY.md` section 15.
-    #[test]
-    fn a_file_this_run_did_not_create_is_never_removed() {
-        let dir = scratch("not-ours");
-        let path = dir.join("p1-c2-s1-first-4.bin");
-        fs::write(&path, b"not this tool's").expect("planting a file");
-
-        let taken = discard(Sink::Taken, Some(path.as_path()));
-        let unopened = discard(Sink::Unopened("denied".to_string()), Some(path.as_path()));
-        assert!(
-            taken.is_none() && unopened.is_none(),
-            "{taken:?} {unopened:?}"
-        );
-        let output = settle(
-            Sink::Unopened("denied".to_string()),
-            Some(path.clone()),
-            &mut [0u8; CLUSTER_BYTES],
-        );
-
-        assert!(
-            matches!(output, Some(Output::NotCreated { .. })),
-            "expected NotCreated, got {output:?}"
-        );
-        assert_eq!(
-            fs::read(&path).expect("reading the planted file"),
-            b"not this tool's"
-        );
-    }
-
-    /// A file that could not be created is reported as such, and not as a
-    /// failure that may have left something behind.
-    ///
-    /// A missing directory is used rather than permission bits, so the
-    /// result does not depend on whether the tests run as root.
-    #[test]
-    fn a_file_that_could_not_be_created_is_reported_not_created() {
-        let dir = scratch("uncreatable");
-        let path = dir.join("missing").join("p1-c2-s1-first-4.bin");
-
-        let sink = open_sink(Some(&path));
-        assert!(
-            matches!(sink, Sink::Unopened(_)),
-            "expected the open to fail"
-        );
-
-        let output = settle(sink, Some(path.clone()), &mut [0u8; CLUSTER_BYTES]);
-
-        assert!(
-            matches!(output, Some(Output::NotCreated { .. })),
-            "expected NotCreated, got {output:?}"
-        );
-        assert!(!path.exists());
-    }
-
-    /// ADR-0015 Decision G. A write failure removes what was written and
-    /// says whether the removal succeeded.
-    #[test]
-    fn a_write_failure_removes_the_partial_file_and_says_so() {
-        let dir = scratch("write-failure");
-        let path = dir.join("p1-c2-s1-first-4.bin");
-        fs::write(&path, b"truncated").expect("planting a partial file");
-
-        let output = settle(
-            Sink::Broken("no space left".to_string()),
-            Some(path.clone()),
-            &mut [0u8; CLUSTER_BYTES],
-        );
-
-        assert!(
-            matches!(output, Some(Output::Failed { removed: true, .. })),
-            "expected Failed with the file removed, got {output:?}"
-        );
-        assert!(!path.exists(), "the partial file survived");
-    }
-
-    /// ADR-0015 section 9. A partial file the run could not remove is
-    /// reported, not assumed gone.
-    ///
-    /// Unix-specific because it relies on permission bits, as
-    /// `tests/read_only.rs` does. Removing a file needs the same write
-    /// permission on its directory as creating one, so the control proves
-    /// the directory refuses both; running as root would defeat it, and the
-    /// control makes that a failure rather than a vacuous pass.
-    #[cfg(unix)]
-    #[test]
-    fn a_partial_file_that_cannot_be_removed_is_reported() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = scratch("unremovable");
-        let path = dir.join("p1-c2-s1-first-4.bin");
-        fs::write(&path, b"truncated").expect("planting a partial file");
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))
-            .expect("making the destination read-only");
-
-        let accepted = fs::File::create(dir.join("probe")).is_ok();
-        let left = discard(
-            Sink::Broken("no space left".to_string()),
-            Some(path.as_path()),
-        );
-
-        // Restored before any assertion, so a failure cannot leave behind a
-        // directory the next run's scratch() is unable to remove.
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))
-            .expect("restoring the destination");
-
-        assert!(
-            !accepted,
-            "control failed: the directory accepted a new file, so this test proves nothing"
-        );
-        assert!(left.is_some(), "a failed removal was not reported");
-        assert!(path.exists(), "the file was removed after all");
     }
 
     /// Both failures reach the operator: the message carries the evidence

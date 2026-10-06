@@ -59,6 +59,7 @@ pub mod analysis;
 pub mod confidence;
 pub mod error;
 pub mod evidence;
+pub mod extraction;
 pub mod fat;
 pub mod fat32;
 pub mod fat_directory;
